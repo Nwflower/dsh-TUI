@@ -39,4 +39,49 @@ function check(name, ok, extra = '') {
   check('1e. 空文档 → 零行零坏行', parseJsonl('').records.length === 0 && parseJsonl('').badLines === 0)
 }
 
+// ── 2. 注入识别与包装剥离 ───────────────────────────────────────────────
+{
+  const { isInjectedText, unwrapUserText, stripSystemReminders, isInterruptNotice } =
+    await import('../src/dsh-adapter/migrate/parse/injection.js')
+  const injected = [
+    '<environment_context>\n  <cwd>/tmp/x</cwd>\n</environment_context>',
+    '  <system-reminder>提醒</system-reminder>',
+    '<USER_INSTRUCTIONS>大写也算</USER_INSTRUCTIONS>',
+    '<local-command-caveat>Caveat</local-command-caveat>',
+    '<local-command-stdout>ok</local-command-stdout>',
+    '<command-name>/model</command-name>',
+    '<permissions>…</permissions>',
+    '<user_info>OS: linux</user_info>',
+    '# AGENTS.md instructions for /tmp/x\n\n<INSTRUCTIONS>…',
+    '# Context from my IDE setup:\n\n## Open tabs',
+  ]
+  const missed = injected.filter(text => !isInjectedText(text))
+  check('2a. 注入前缀表逐条命中（大小写不敏感、允许前导空白）', missed.length === 0, missed.join(' | '))
+  check('2b. 真实提问不误判（正文中间出现标签不算注入）',
+    !isInjectedText('请看 <system-reminder> 这个标签') && !isInjectedText('# 标题\n正文'))
+  check('2c. <user_query> 只留正文', unwrapUserText('<user_query>\n修一下构建\n</user_query>') === '修一下构建')
+  check('2d. 中断包装只留 <user_query> 正文',
+    unwrapUserText('The user interrupted the previous turn: stop.\n<user_query>换个思路</user_query>') === '换个思路')
+  check('2e. 插话包装只留 <user_query> 正文',
+    unwrapUserText('The user sent a message while you were working:\n<user_query>顺便加测试</user_query>') === '顺便加测试')
+  check('2f. 无 <user_query> 的包装去掉通知行首',
+    unwrapUserText('The user sent a message while you were working: 顺便加测试') === '顺便加测试')
+  check('2g. 未闭合的 <user_query> 取到末尾', unwrapUserText('<user_query>半截') === '半截')
+  check('2h. 粘贴信封去标签留正文（含无闭标签形态）',
+    unwrapUserText('看这段 <pasted_content id="p1">A\nB</pasted_content id="p1"> 怎么改') === '看这段 A\nB 怎么改'
+    && unwrapUserText('<pasted_content id="p2">只有开标签') === '只有开标签')
+  check('2i. 纯文本快速路径原样（仅去首尾空白）', unwrapUserText('  普通提问  ') === '普通提问')
+  check('2j. system-reminder 行内剥离（多段、未闭合吞到末尾）',
+    stripSystemReminders('前<system-reminder>a</system-reminder>中<system-reminder>b</system-reminder>后') === '前中后'
+    && stripSystemReminders('正文<system-reminder>未闭合') === '正文')
+  check('2k. 中断通知识别', isInterruptNotice('The user interrupted the previous turn: x') && !isInterruptNotice('interrupted'))
+  // 线性扫描守卫：大量未闭合开标签不应退化为二次方
+  const hostile = '<system-reminder>'.repeat(20000)
+  const started = performance.now()
+  stripSystemReminders(hostile)
+  unwrapUserText('<user_query>'.repeat(20000))
+  const elapsed = performance.now() - started
+  check('2l. 敌意输入（2 万个未闭合开标签）线性完成', elapsed < 500, `${elapsed.toFixed(1)}ms`)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
