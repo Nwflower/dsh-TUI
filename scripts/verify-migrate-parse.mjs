@@ -415,4 +415,25 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
     !JSON.stringify(session).includes('gAAAA') && steps.length === 2)
 }
 
+{
+  // compacted 常落在一轮工具执行的中间：边界后的产物以空提问轮继续
+  const session = cxParse([
+    cxMeta(),
+    cxRow('turn_context', { model: 'gpt-c' }),
+    cxUser('大任务'),
+    cxItem({ type: 'function_call', call_id: 'f1', name: 'shell', arguments: '{}' }),
+    cxItem({ type: 'function_call_output', call_id: 'f1', output: 'ok' }),
+    cxRow('compacted', { message: '交接摘要：已完成第一阶段', replacement_history: [] }),
+    cxItem({ type: 'function_call', call_id: 'f2', name: 'shell', arguments: '{}' }),
+    cxItem({ type: 'function_call_output', call_id: 'f2', output: 'ok2' }),
+    cxAsst('阶段二完成'),
+    cxUser('下一个问题'),
+    cxAsst('答'),
+    cxRow('compacted', { message: '尾部摘要' }),
+  ])
+  const shape = session.turns.map(t => `${t.prompt || '∅'}${t.compaction ? `[${t.compaction.summary.slice(0, 4)}@${t.compaction.model}]` : ''}:${t.steps.length}`)
+  check('7m. compacted 转检查点挂到边界后的轮；轮中途的边界后半段成空提问轮；停在边界保留检查点轮',
+    shape.join(' | ') === '大任务:1 | ∅[交接摘要@gpt-c]:2 | 下一个问题:1 | ∅[尾部摘要@gpt-c]:0', shape.join(' | '))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)

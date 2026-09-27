@@ -25,7 +25,7 @@ import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
 import { normalizeTitle } from '../parse/title.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
-import type { ImportStep, ImportTurn, MigrationSession } from '../types.js'
+import type { ImportCompaction, ImportStep, ImportTurn, MigrationSession } from '../types.js'
 
 /** What the adapter knows about a rollout besides its text. */
 export interface CodexRolloutInput {
@@ -113,6 +113,15 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
   let step: ImportStep | undefined
   let sawOutput = false
   let unnamedCalls = 0
+  /** A compaction summary waiting for the turn that follows the boundary. */
+  let pendingCompaction: ImportCompaction | undefined
+
+  const openTurn = (prompt: string): void => {
+    current = pendingCompaction === undefined ? { prompt, steps: [] } : { prompt, compaction: pendingCompaction, steps: [] }
+    pendingCompaction = undefined
+    turns.push(current)
+    step = undefined
+  }
 
   /**
    * The step a model-produced item belongs to. One model call returns its
@@ -121,13 +130,10 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
    * call.
    */
   const modelStep = (): ImportStep => {
-    if (current === undefined) {
-      current = { prompt: '', steps: [] }
-      turns.push(current)
-    }
+    if (current === undefined) openTurn('')
     if (step === undefined || sawOutput) {
       step = newStep(model)
-      current.steps.push(step)
+      current!.steps.push(step)
       sawOutput = false
     }
     return step
@@ -140,9 +146,7 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
           const { text: prompt, dropped } = userPrompt(payload.content)
           stats.filtered += dropped
           if (prompt === '') return
-          current = { prompt, steps: [] }
-          turns.push(current)
-          step = undefined
+          openTurn(prompt)
         } else if (payload.role === 'assistant') {
           const text = blocksText(payload.content, 'output_text')
           if (text !== '') modelStep().blocks.push({ type: 'text', text })
@@ -191,6 +195,19 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
       continue
     }
     // Codex records the active model per turn; it applies to the steps after it.
+    // Compaction boundary: Codex folded the window before it into a handoff
+    // summary and kept writing the same rollout. The summary becomes a
+    // native checkpoint in front of the next turn; a turn cut in half by the
+    // boundary continues as a prompt-less turn after it.
+    if (record.type === 'compacted') {
+      const summary = typeof payload.message === 'string' ? payload.message.trim() : ''
+      if (summary !== '') {
+        pendingCompaction = model === undefined ? { summary } : { summary, model }
+        current = undefined
+        step = undefined
+      }
+      continue
+    }
     if (record.type === 'turn_context') {
       if (typeof payload.model === 'string' && payload.model !== '') model = payload.model
       continue
@@ -200,7 +217,8 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
     acceptItem(payload)
   }
 
-  turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
+  if (pendingCompaction !== undefined) turns.push({ prompt: '', compaction: pendingCompaction, steps: [] })
+  turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0 || turn.compaction !== undefined)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (cwd === undefined || !turns.some(turn => turn.prompt !== '')) return undefined
   // Codex keeps no title of its own: the first real prompt is the fallback.
