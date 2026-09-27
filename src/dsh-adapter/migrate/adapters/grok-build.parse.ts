@@ -20,7 +20,11 @@ import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { emptyStats } from '../parse/role-turns.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
-import type { ImportTurn, MigrationSession } from '../types.js'
+import type { ImportCompaction, ImportTurn, MigrationSession } from '../types.js'
+
+/** How a compaction summary row opens (the other compaction_meta rows are
+ *  the re-injected environment block). */
+const COMPACTION_SUMMARY_LEAD = 'This session is being continued'
 
 /** One session directory's two files, as text. */
 export interface GrokSessionInput {
@@ -80,6 +84,15 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
   let turns: ImportTurn[] = []
   let current: ImportTurn | undefined
   let pendingReasoning: string[] = []
+  /** A compaction summary waiting for the turn that follows the boundary. */
+  let pendingCompaction: ImportCompaction | undefined
+  let lastModel: string | undefined
+  const openTurn = (prompt: string): ImportTurn => {
+    const turn: ImportTurn = pendingCompaction === undefined ? { prompt, steps: [] } : { prompt, compaction: pendingCompaction, steps: [] }
+    pendingCompaction = undefined
+    turns.push(turn)
+    return turn
+  }
   const calls = new CallIndex()
 
   for (const row of records) {
@@ -88,7 +101,15 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
       // Tagged synthetic injections (system reminders, compaction meta, …)
       // are not the human's words; the default `human` tag is omitted.
       if (row.synthetic_reason !== undefined && row.synthetic_reason !== 'human') {
-        stats.filtered += 1
+        // A compaction leaves its summary as a synthetic row: the boundary
+        // becomes a native checkpoint in front of the next turn.
+        const text = blocksText(row.content).trim()
+        if (row.synthetic_reason === 'compaction_meta' && text.startsWith(COMPACTION_SUMMARY_LEAD)) {
+          pendingCompaction = lastModel === undefined ? { summary: text } : { summary: text, model: lastModel }
+          current = undefined
+        } else {
+          stats.filtered += 1
+        }
         continue
       }
       const raw = blocksText(row.content)
@@ -104,16 +125,13 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
       if (prompt === '') continue
       // Speaking over a running turn cut that turn short.
       if (row.prior_turn_interrupt !== undefined && current !== undefined) current.aborted = true
-      current = { prompt, steps: [] }
-      turns.push(current)
+      current = openTurn(prompt)
     } else if (kind === 'assistant') {
       const text = blocksText(row.content)
       const toolCalls = Array.isArray(row.tool_calls) ? row.tool_calls.filter(isRecord) : []
       if (text === '' && pendingReasoning.length === 0 && toolCalls.length === 0) continue
-      if (current === undefined) {
-        current = { prompt: '', steps: [] }
-        turns.push(current)
-      }
+      current ??= openTurn('')
+      if (typeof row.model_id === 'string' && row.model_id !== '') lastModel = row.model_id
       const step = newStep(typeof row.model_id === 'string' && row.model_id !== '' ? row.model_id : undefined)
       // A reasoning row is the pre-sibling of the assistant row it explains.
       for (const reasoning of pendingReasoning) step.blocks.push({ type: 'reasoning', text: reasoning })
@@ -143,7 +161,8 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
     }
   }
 
-  turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
+  if (pendingCompaction !== undefined) turns.push({ prompt: '', compaction: pendingCompaction, steps: [] })
+  turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0 || turn.compaction !== undefined)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (!turns.some(turn => turn.prompt !== '')) return undefined
   return { sourceId: id, cwd, ...(title === undefined ? {} : { title }), titleExplicit: false, startedAt, turns, stats }

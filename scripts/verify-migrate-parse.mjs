@@ -549,4 +549,20 @@ const gkParse = (rows, summary = gkSummary()) => parseGrokSession({ summaryJson:
   check('8i. 合成提醒与 <user_info> 不开轮，计入 filtered', session.stats.filtered === 2 && session.turns.length === 3)
 }
 
+{
+  const session = gkParse([
+    gkUser('<user_query>长任务</user_query>'),
+    gkAsst('做了一半'),
+    // 真实压缩形态：两条 compaction_meta（环境块 + 摘要），之后源 agent 直接续跑
+    gkUser('<user_info>\nOS Version: windows</user_info>', { synthetic_reason: 'compaction_meta' }),
+    gkUser('This session is being continued from a previous conversation that ran out of context. Summary: …', { synthetic_reason: 'compaction_meta' }),
+    gkAsst('接着做'),
+    gkUser('<user_query>下一个</user_query>'),
+    gkAsst('好'),
+  ])
+  const shape = session.turns.map(t => `${t.prompt || '∅'}${t.compaction ? `[${t.compaction.summary.slice(0, 12)}@${t.compaction.model}]` : ''}:${t.steps.length}`)
+  check('8j. compaction_meta 的摘要行转检查点挂到边界后的轮；环境块计入 filtered',
+    shape.join(' | ') === '长任务:1 | ∅[This session@grok-x]:1 | 下一个:1' && session.stats.filtered === 1, shape.join(' | '))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
