@@ -97,7 +97,10 @@ function toolOutputText(output: unknown): string {
 
 /**
  * Parse one Codex rollout.
- * @returns The session, or undefined when it records no cwd or no prompt.
+ * @returns The session, or undefined when it records no cwd or no prompt, or
+ *   is a sub-agent thread (`thread_source: 'subagent'` / `source.subagent`):
+ *   those are spawned by a main session and are not conversations of their
+ *   own. Forks (`forked_from_id` without the sub-agent marker) are kept.
  */
 export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | undefined {
   const { records, badLines } = parseJsonl(input.raw)
@@ -113,6 +116,8 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
   let step: ImportStep | undefined
   let sawOutput = false
   let unnamedCalls = 0
+  let sawMeta = false
+  let subagent = false
   /** A compaction summary waiting for the turn that follows the boundary. */
   let pendingCompaction: ImportCompaction | undefined
 
@@ -190,8 +195,15 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
     if (!isRecord(payload)) continue
     const time = toMillis(record.timestamp)
     if (record.type === 'session_meta') {
-      if (typeof payload.cwd === 'string' && payload.cwd !== '') cwd = payload.cwd
-      startedAt ||= toMillis(payload.timestamp) || time
+      // Only the FIRST meta describes this rollout: a forked or spawned
+      // thread repeats its parent's meta after its own, with the inherited
+      // history.
+      if (!sawMeta) {
+        sawMeta = true
+        if (typeof payload.cwd === 'string' && payload.cwd !== '') cwd = payload.cwd
+        startedAt ||= toMillis(payload.timestamp) || time
+        subagent = payload.thread_source === 'subagent' || (isRecord(payload.source) && payload.source.subagent !== undefined)
+      }
       continue
     }
     // Codex records the active model per turn; it applies to the steps after it.
@@ -227,7 +239,7 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
   if (pendingCompaction !== undefined) turns.push({ prompt: '', compaction: pendingCompaction, steps: [] })
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0 || turn.compaction !== undefined)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
-  if (cwd === undefined || !turns.some(turn => turn.prompt !== '')) return undefined
+  if (subagent || cwd === undefined || !turns.some(turn => turn.prompt !== '')) return undefined
   // Codex keeps no title of its own: the first real prompt is the fallback.
   const firstPrompt = turns.find(turn => turn.prompt !== '')?.prompt
   const title = normalizeTitle(firstPrompt === undefined ? undefined : unwrapUserText(firstPrompt))

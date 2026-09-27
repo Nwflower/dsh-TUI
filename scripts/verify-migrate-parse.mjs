@@ -449,4 +449,15 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
     session.turns[0].aborted === true && session.turns[1].aborted === undefined)
 }
 
+{
+  const body = [cxUser('任务'), cxAsst('结果')]
+  const parent = cxMeta({ id: 'parent', cwd: '/w/parent' })
+  check('7o. 首个 session_meta 标记子代理（thread_source 或 source.subagent）的 rollout 不成会话',
+    cxParse([cxMeta({ thread_source: 'subagent' }), parent, ...body]) === undefined
+    && cxParse([cxMeta({ source: { subagent: { thread_spawn: { parent_thread_id: 'parent' } } } }), parent, ...body]) === undefined)
+  const fork = cxParse([cxMeta({ cwd: '/w/fork', forked_from_id: 'parent' }), cxMeta({ id: 'parent', cwd: '/w/parent', thread_source: 'subagent' }), ...body])
+  check('7p. 只看首个 meta：fork 会话保留，继承来的父 meta 不改 cwd、不触发排除',
+    fork !== undefined && fork.cwd === '/w/fork')
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
