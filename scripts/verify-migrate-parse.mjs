@@ -577,4 +577,26 @@ const gkParse = (rows, summary = gkSummary()) => parseGrokSession({ summaryJson:
     titleOf({ session_summary: '  ' }) === '兜底 提问|false', titleOf({ session_summary: '  ' }))
 }
 
+// ── 9. zcode ────────────────────────────────────────────────────────────
+const { parseZcodeSession } = await import('../src/dsh-adapter/migrate/adapters/zcode.parse.js')
+const zcDoc = (messages, meta = {}) => JSON.stringify({
+  meta: { taskId: 'task-1', workspacePath: '/w/zc', createdAt: 1790000000000, title: 'zcode 标题', ...meta }, messages,
+})
+{
+  const session = parseZcodeSession(zcDoc([
+    null,
+    { role: 'user', content: '问' },
+    { role: 'assistant', content: '答一' },
+    { role: 'assistant', content: '答二' },
+    { role: 'tool', content: '未知角色不映射' },
+    { role: 'user', content: '' },
+  ]))
+  check('9a. user 开轮、其后每条 assistant 一步；未知角色与空内容跳过',
+    session.turns.length === 1 && session.turns[0].steps.map(s => s.blocks[0].text).join('+') === '答一+答二')
+  check('9b. sourceId/cwd/startedAt 取 meta；缺 taskId 或非 {meta,messages} 文档不成会话',
+    session.sourceId === 'task-1' && session.cwd === '/w/zc' && session.startedAt === 1790000000000
+    && parseZcodeSession(zcDoc([{ role: 'user', content: 'q' }], { taskId: '' })) === undefined
+    && parseZcodeSession('null') === undefined && parseZcodeSession('{broken') === undefined)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
