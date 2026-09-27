@@ -13,13 +13,18 @@
  * dropped; a user message made only of them opens no turn and never titles
  * the session.
  *
+ * Tool traffic: `function_call` / `custom_tool_call` items are tool calls of
+ * the step in progress; their `*_output` items pair back by `call_id`. A
+ * step is one model call: an output ends it, and the next model-produced
+ * item opens the next one.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/codex.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
 import { normalizeTitle } from '../parse/title.js'
-import { IMAGE_PLACEHOLDER, newStep } from '../parse/tools.js'
+import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
 import type { ImportStep, ImportTurn, MigrationSession } from '../types.js'
 
 /** What the adapter knows about a rollout besides its text. */
@@ -62,6 +67,35 @@ function userPrompt(content: unknown): { text: string, dropped: number } {
 }
 
 /**
+ * Model-facing text of a tool output. Codex writes three shapes: a plain
+ * string, a JSON string `{"output": "...", "metadata": …}` (the inner output
+ * is what the model saw), and an array of `input_text` / `input_image`
+ * blocks (the most common shape in current rollouts).
+ */
+function toolOutputText(output: unknown): string {
+  if (Array.isArray(output)) {
+    const parts: string[] = []
+    for (const block of output) {
+      if (!isRecord(block)) continue
+      if (block.type === 'input_text' && typeof block.text === 'string') parts.push(block.text)
+      else if (block.type === 'input_image') parts.push(IMAGE_PLACEHOLDER)
+    }
+    return parts.join('\n')
+  }
+  if (isRecord(output)) return typeof output.output === 'string' ? output.output : JSON.stringify(output)
+  if (typeof output !== 'string') return ''
+  if (output.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(output)
+      if (isRecord(parsed) && typeof parsed.output === 'string') return parsed.output
+    } catch {
+      // Plain text that happens to start with a brace.
+    }
+  }
+  return output
+}
+
+/**
  * Parse one Codex rollout.
  * @returns The session, or undefined when it records no cwd or no prompt.
  */
@@ -74,27 +108,67 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
   let startedAt = 0
   let model: string | undefined
 
-  const openStep = (): ImportStep => {
+  const calls = new CallIndex()
+  /** The model call in progress; a tool output ends it (see modelStep). */
+  let step: ImportStep | undefined
+  let sawOutput = false
+  let unnamedCalls = 0
+
+  /**
+   * The step a model-produced item belongs to. One model call returns its
+   * reasoning, message and tool calls together, then the harness appends the
+   * tool outputs; so the first model item AFTER an output starts the next
+   * call.
+   */
+  const modelStep = (): ImportStep => {
     if (current === undefined) {
       current = { prompt: '', steps: [] }
       turns.push(current)
     }
-    const step = newStep(model)
-    current.steps.push(step)
+    if (step === undefined || sawOutput) {
+      step = newStep(model)
+      current.steps.push(step)
+      sawOutput = false
+    }
     return step
   }
 
-  const acceptMessage = (payload: JsonRecord): void => {
-    if (payload.role === 'user') {
-      const { text: prompt, dropped } = userPrompt(payload.content)
-      stats.filtered += dropped
-      if (prompt === '') return
-      current = { prompt, steps: [] }
-      turns.push(current)
-    } else if (payload.role === 'assistant') {
-      const text = blocksText(payload.content, 'output_text')
-      if (text === '') return
-      openStep().blocks.push({ type: 'text', text })
+  const acceptItem = (payload: JsonRecord): void => {
+    switch (payload.type) {
+      case 'message': {
+        if (payload.role === 'user') {
+          const { text: prompt, dropped } = userPrompt(payload.content)
+          stats.filtered += dropped
+          if (prompt === '') return
+          current = { prompt, steps: [] }
+          turns.push(current)
+          step = undefined
+        } else if (payload.role === 'assistant') {
+          const text = blocksText(payload.content, 'output_text')
+          if (text !== '') modelStep().blocks.push({ type: 'text', text })
+        }
+        return
+      }
+      case 'function_call':
+      case 'custom_tool_call': {
+        const id = typeof payload.call_id === 'string' && payload.call_id !== '' ? payload.call_id : `codex-call-${++unnamedCalls}`
+        const name = typeof payload.name === 'string' && payload.name !== '' ? payload.name : 'unknown'
+        // function_call arguments are the model's JSON text; a custom tool's
+        // input is free-form (a patch, a JS snippet), kept as one JSON field.
+        const args = payload.type === 'function_call'
+          ? (typeof payload.arguments === 'string' ? payload.arguments : JSON.stringify(payload.arguments ?? {}))
+          : JSON.stringify({ input: payload.input ?? '' })
+        const target = modelStep()
+        target.blocks.push({ type: 'tool-call', id, name, arguments: args })
+        calls.register(target)
+        return
+      }
+      case 'function_call_output':
+      case 'custom_tool_call_output': {
+        if (typeof payload.call_id === 'string') calls.attach(payload.call_id, toolOutputText(payload.output), false)
+        else calls.orphans += 1
+        sawOutput = true
+      }
     }
   }
 
@@ -112,12 +186,13 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
       if (typeof payload.model === 'string' && payload.model !== '') model = payload.model
       continue
     }
-    if (record.type !== 'response_item' || payload.type !== 'message') continue
+    if (record.type !== 'response_item') continue
     startedAt ||= time
-    acceptMessage(payload)
+    acceptItem(payload)
   }
 
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
+  stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (cwd === undefined || !turns.some(turn => turn.prompt !== '')) return undefined
   // Codex keeps no title of its own: the first real prompt is the fallback.
   const firstPrompt = turns.find(turn => turn.prompt !== '')?.prompt

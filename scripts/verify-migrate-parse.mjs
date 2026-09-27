@@ -366,4 +366,33 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
   check('7f. 标题兜底首个真实提问（归一空白），不算显式', session.title === '真正的 第一问' && session.titleExplicit === false)
 }
 
+{
+  const session = cxParse([
+    cxMeta(),
+    cxUser('跑一下测试'),
+    // 第一次模型调用：说明 + 两个调用（function_call 与 custom_tool_call）
+    cxAsst('我先看看'),
+    cxItem({ type: 'function_call', call_id: 'fc_1', name: 'shell', arguments: '{"cmd":["ls"]}' }),
+    cxItem({ type: 'custom_tool_call', call_id: 'ct_1', name: 'exec', input: 'const r = await tools.exec_command({cmd:"npm test"})' }),
+    // 三种输出形态：JSON 字符串、块数组（含图片）
+    cxItem({ type: 'function_call_output', call_id: 'fc_1', output: '{"output":"a.ts\\nb.ts","metadata":{"exit_code":0}}' }),
+    cxItem({ type: 'custom_tool_call_output', call_id: 'ct_1', output: [{ type: 'input_text', text: '12 passed' }, { type: 'input_image', image_url: 'x' }] }),
+    // 输出之后的模型产物开启第二次调用
+    cxItem({ type: 'custom_tool_call', call_id: 'ct_2', name: 'apply_patch', input: '*** Begin Patch' }),
+    cxItem({ type: 'custom_tool_call_output', call_id: 'ct_2', output: '纯文本输出' }),
+    cxItem({ type: 'function_call_output', call_id: 'ghost', output: '孤儿' }),
+    cxAsst('测试都过了'),
+  ])
+  const steps = session.turns[0].steps
+  check('7g. 步边界：同一次调用的消息与多个调用同一步，输出之后的产物开新步',
+    steps.map(s => s.blocks.map(b => b.type === 'tool-call' ? b.id : 'text').join('+')).join(' | ') === 'text+fc_1+ct_1 | ct_2 | text',
+    steps.map(s => s.blocks.map(b => b.type === 'tool-call' ? b.id : 'text').join('+')).join(' | '))
+  check('7h. function_call 参数原样；custom_tool_call 的自由格式 input 包成 {"input":…}',
+    steps[0].blocks[1].arguments === '{"cmd":["ls"]}' && JSON.parse(steps[0].blocks[2].arguments).input.startsWith('const r = await'))
+  check('7i. 输出三形态取模型所见文本：JSON 内层 output、块数组（图片占位）、纯字符串',
+    steps[0].results.map(r => r.text).join(' / ') === 'a.ts\nb.ts / 12 passed\n[image]' && steps[1].results[0].text === '纯文本输出',
+    steps[0].results.map(r => r.text).join(' / '))
+  check('7j. 找不到调用的输出计入 droppedToolResults', session.stats.droppedToolResults === 1)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
