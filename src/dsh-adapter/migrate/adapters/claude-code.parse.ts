@@ -13,10 +13,16 @@
  * after every tool_use of the response has been written; each is paired to
  * the step that made the call by `tool_use_id` (never to the newest step).
  *
+ * Machine text in the user role: `isMeta` lines are context the model saw
+ * mid-turn and become the next step's inputs (never a turn); slash-command
+ * echoes become `/name args` prompts, dropped when the model never answered
+ * them (local commands); local-command output and other injection is
+ * dropped. Everything dropped is counted in `stats.filtered`.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/claude-code.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
-import { stripSystemReminders } from '../parse/injection.js'
+import { isInjectedText, stripSystemReminders } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
 import type { ImportStep, ImportTurn, MigrationSession } from '../types.js'
@@ -34,13 +40,15 @@ function toMillis(iso: unknown): number {
   return typeof iso === 'string' ? Date.parse(iso) || 0 : 0
 }
 
-/** Text of a string or block-array content (text blocks only). */
+/** Text of a string or block-array content; each image becomes a placeholder. */
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
   const parts: string[] = []
   for (const block of content) {
-    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string' && block.text !== '') parts.push(block.text)
+    if (!isRecord(block)) continue
+    if (block.type === 'text' && typeof block.text === 'string' && block.text !== '') parts.push(block.text)
+    else if (block.type === 'image') parts.push(IMAGE_PLACEHOLDER)
   }
   return parts.join('\n\n')
 }
@@ -57,6 +65,27 @@ function toolResultText(content: unknown): string {
     else if (block.type === 'image') parts.push(IMAGE_PLACEHOLDER)
   }
   return parts.join('\n')
+}
+
+/** Whether a user text is Claude Code's echo of a slash command. */
+function isCommandEcho(text: string): boolean {
+  return text.startsWith('<command-name>') || text.startsWith('<command-message>')
+}
+
+/** Body of the first `<tag>…</tag>` in text, or ''. */
+function tagBody(text: string, tag: string): string {
+  const open = `<${tag}>`
+  const start = text.indexOf(open)
+  if (start === -1) return ''
+  const end = text.indexOf(`</${tag}>`, start + open.length)
+  return text.slice(start + open.length, end === -1 ? undefined : end).trim()
+}
+
+/** A slash-command echo as the user typed it: `/name args`. */
+function commandPrompt(text: string): string {
+  const name = tagBody(text, 'command-name')
+  const args = tagBody(text, 'command-args')
+  return `${name} ${args}`.trim() || text
 }
 
 /** Whether a user line is a tool-result carrier rather than a prompt. */
@@ -78,6 +107,10 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
   let startedAt = 0
   let lineCwd: string | undefined
   const calls = new CallIndex()
+  /** isMeta texts waiting for the next step of the current turn. */
+  let pendingInputs: string[] = []
+  /** Turns opened by a slash-command echo rather than typed words. */
+  const commandTurns = new Set<ImportTurn>()
 
   const openTurn = (prompt: string): void => {
     current = { prompt, steps: [] }
@@ -92,6 +125,8 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     let step = messageId === undefined ? undefined : stepOfMessage.get(messageId)
     if (step === undefined) {
       step = newStep(typeof message.model === 'string' && message.model !== '' ? message.model : undefined)
+      step.inputs = pendingInputs
+      pendingInputs = []
       turn.steps.push(step)
       if (messageId !== undefined) stepOfMessage.set(messageId, step)
     }
@@ -124,10 +159,43 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     }
   }
 
+  const acceptUserText = (record: JsonRecord, content: unknown): void => {
+    const raw = textOf(content)
+    const text = stripSystemReminders(raw)
+    if (record.isMeta === true) {
+      // Machine context the model saw mid-turn (skill bodies, image notes,
+      // "Continue from where you left off."): it enters the NEXT step as a
+      // user input instead of opening a turn. Local-command caveats carry
+      // no model reply and are dropped.
+      if (text === '' || isInjectedText(raw)) {
+        stats.filtered += 1
+        return
+      }
+      pendingInputs.push(text)
+      stats.meta += 1
+      return
+    }
+    if (isCommandEcho(text)) {
+      openTurn(commandPrompt(text))
+      commandTurns.add(current!)
+      return
+    }
+    if (text === '') return
+    if (isInjectedText(text)) {
+      stats.filtered += 1
+      return
+    }
+    // Mid-turn context that no step consumed before the next prompt is
+    // stale; the prompt starts over.
+    stats.filtered += pendingInputs.length
+    pendingInputs = []
+    openTurn(text)
+  }
+
   for (const record of records) {
     const type = record.type
     if (type !== 'user' && type !== 'assistant') continue
-    if (record.isSidechain === true || record.isMeta === true) continue
+    if (record.isSidechain === true) continue
     const message = record.message
     if (!isRecord(message)) continue
     // Claude Code writes the authoritative cwd on every message line; the
@@ -135,21 +203,25 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     if (typeof record.cwd === 'string' && record.cwd !== '') lineCwd = record.cwd
     if (startedAt === 0) startedAt = toMillis(record.timestamp)
     if (type === 'user') {
-      if (isToolResultLine(message.content)) {
-        attachResults(message.content as unknown[])
-        continue
-      }
-      const prompt = stripSystemReminders(textOf(message.content))
-      if (prompt === '') continue
-      openTurn(prompt)
+      if (isToolResultLine(message.content)) attachResults(message.content as unknown[])
+      else acceptUserText(record, message.content)
       continue
     }
     appendAssistant(message)
   }
+  stats.filtered += pendingInputs.length
 
-  // A response that produced nothing importable leaves no step behind.
-  for (const turn of turns) turn.steps = turn.steps.filter(step => step.blocks.length > 0)
-  turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
+  // A response that produced nothing importable leaves no step behind, and
+  // a slash command the model never answered (/model, /clear, …) is local
+  // housekeeping, not conversation.
+  for (const turn of turns) turn.steps = turn.steps.filter(step => step.blocks.length > 0 || step.inputs.length > 0)
+  turns = turns.filter(turn => {
+    if (commandTurns.has(turn) && turn.steps.length === 0) {
+      stats.filtered += 1
+      return false
+    }
+    return turn.prompt !== '' || turn.steps.length > 0
+  })
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (!turns.some(turn => turn.prompt !== '')) return undefined
 

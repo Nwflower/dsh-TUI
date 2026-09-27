@@ -229,4 +229,39 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
     step2.results.length === 1 && step2.results[0].text === '' && session.stats.droppedToolResults === 1 && step3.results.length === 0)
 }
 
+{
+  // isMeta 与命令回显：真实转录里的几种机器文本
+  const session = ccParse([
+    // 本地命令：caveat(isMeta) + 命令回显 + stdout，模型没有回复 → 整体不导入
+    ccUser('<local-command-caveat>Caveat: generated while running local commands</local-command-caveat>', { isMeta: true }),
+    ccUser('<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>'),
+    ccUser('<local-command-stdout>Set model to opus</local-command-stdout>'),
+    ccUser('真实提问'),
+    ccAsst('msg_1', [{ type: 'tool_use', id: 'tu_skill', name: 'Skill', input: { skill: 'review' } }]),
+    ccUser([{ type: 'tool_result', tool_use_id: 'tu_skill', content: 'Launching skill: review' }]),
+    // skill 正文与图片说明以 isMeta 出现在一轮中间 → 下一步的输入，不开新轮
+    ccUser([{ type: 'text', text: 'Base directory for this skill: /skills/review' }], { isMeta: true }),
+    ccUser([{ type: 'text', text: '[Image: source: /tmp/shot.png]' }, { type: 'image', source: { data: 'AAAA' } }], { isMeta: true }),
+    ccAsst('msg_2', [{ type: 'text', text: '按 skill 审查' }]),
+    // 会调用模型的命令（skill 命令）：回显还原成 /name args 并正常成轮
+    ccUser('<command-message>review is running…</command-message>\n<command-name>/review</command-name>\n<command-args>src/</command-args>'),
+    ccUser('Base directory for this skill: /skills/review', { isMeta: true }),
+    ccAsst('msg_3', [{ type: 'text', text: '开始审查 src/' }]),
+    // 纯图片提问保留占位
+    ccUser([{ type: 'image', source: { data: 'BBBB' } }]),
+    ccAsst('msg_4', [{ type: 'text', text: '这是一张截图' }]),
+  ])
+  const prompts = session.turns.map(turn => turn.prompt)
+  check('6h. 本地命令（caveat/回显/stdout，无模型回复）不成轮',
+    prompts.join('|') === '真实提问|/review src/|[image]', prompts.join('|'))
+  const [, step2] = session.turns[0].steps
+  check('6i. 轮中途的 isMeta 成为下一步的输入，不开新轮；图片换占位',
+    session.turns[0].steps.length === 2
+    && JSON.stringify(step2.inputs) === JSON.stringify(['Base directory for this skill: /skills/review', '[Image: source: /tmp/shot.png]\n\n[image]']),
+    JSON.stringify(step2.inputs))
+  check('6j. 命令轮后的 isMeta 进入该轮首步输入', session.turns[1].steps[0].inputs.length === 1)
+  check('6k. 过滤与折叠计数：caveat + stdout + 无回复命令轮 → filtered 3，isMeta 折叠 3',
+    session.stats.filtered === 3 && session.stats.meta === 3, JSON.stringify(session.stats))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
