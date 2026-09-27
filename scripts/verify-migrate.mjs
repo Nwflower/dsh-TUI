@@ -4,20 +4,24 @@
  * 第一版 PR 的教训：只验「头行合法」是假绿。本回归全程跑真实读取链——
  * 覆盖 src/dsh-adapter/migrate/：
  *   1. sessionize：官方 Session.append 生成的事件骨架（turn 配对 = 下一个
- *      user 关闭上一轮 + 收尾关闭最后一轮）、reasoning 块保留、header
- *      cwd/version、CJK 与 emoji 原样进入事件；
+ *      user 关闭上一轮 + 收尾关闭最后一轮，与 live loop 同序，首步空
+ *      system head）、reasoning 块保留、header cwd/version、CJK 与 emoji
+ *      原样进入事件；工具调用与步内输入（4c'，含落盘读回的 wire 合法性）、
+ *      中断轮与显式标题（4c'5–8）、原生压缩检查点（4c''）；
  *   2. 端到端往返（维护者要求的验收链）：fixture 会话 → importSessions
  *      （官方 JsonlSessionPersistence 落盘）→ open(id,'read') 读回 →
  *      Session.fromRestore + deriveMessages：角色/顺序/文本逐一断言；
  *   3. 续聊：restore 后的会话作为 seed 继续追加新一轮 → 写回 → 再读回，
- *      新旧消息同在（导入的会话是活的，不是只能看）；
+ *      新旧消息同在（导入的会话是活的，不是只能看）；按 live loop 的写法
+ *      替换 head 后系统提示词位于第 0 位（3b）；
  *   4. 幂等：同批 fixture 二次导入全部 existing，列表数不变；
  *   5. migrationUuid：确定性（同输入同 id）与区分性（不同 agent 不同 id）；
  *   6. adapter 解析冒烟：五家的最小 fixture 行（含 model 提取、null 防御、
  *      sourceId 必须是裸文件名——幂等键不随源目录移动）；
  *   7. /migrate 命令分类矩阵（pure）：fresh 会话的直接入口、--dry-run 与
  *      多参数语义必须与 CLI 一致。
- * 运行面的交互回归见 scripts/verify-migrate-command.tsx（挂真实 Chat）。
+ * 逐源解析规则见 scripts/verify-migrate-parse.mjs；运行面的交互回归见
+ * scripts/verify-migrate-command.tsx（挂真实 Chat）。
  *
  * 运行：node --import tsx/esm scripts/verify-migrate.mjs
  */

@@ -294,8 +294,9 @@ const GROUPS = {
   'session-workspace': [
 // 跨代理会话迁移回归（claude-code/codex/omp/zcode/grok-build → DSH sessions）：
 // 全程跑官方读取链——Session.append 生成骨架（turn 配对/reasoning/
-// provenance）、JsonlSessionPersistence 落盘、open+fromRestore+
-// deriveMessages 逐消息断言（CJK/emoji 无损）、restore 作 seed 续聊写回、
+// provenance/空 system head/工具调用/中断/标题/压缩检查点）、
+// JsonlSessionPersistence 落盘、open+fromRestore+deriveMessages 逐消息
+// 断言（CJK/emoji 无损、wire 合法）、restore 作 seed 续聊写回并替换 head、
 // uuid v5 幂等、五 adapter fixture 解析（含 sourceId 只取裸文件名）、
 // /migrate 命令分类矩阵。
     ["verify-migrate", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate.mjs']],
