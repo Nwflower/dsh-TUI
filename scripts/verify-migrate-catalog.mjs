@@ -282,6 +282,74 @@ const keyed = entries => entries.filter(e => e.summary !== null).map(e => e.summ
   check('4h. 晚到的旧扫描不覆盖新结果', fast[0]?.sessionKey === 'new' && late[0]?.sessionKey === 'new' && raced.sessions('fake')[0]?.sessionKey === 'new')
 }
 
+// ── 5. 单会话导入（官方 JsonlSessionPersistence）────────────────────────
+{
+  const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { importForeignSession, createForeignImporter } = await import('../src/dsh-adapter/migrate/import-one.js')
+  const { importSessions, migrationSessionId } = await import('../src/dsh-adapter/migrate/index.js')
+  const { claudeCodeAdapter } = await import('../src/dsh-adapter/migrate/adapters/claude-code.js')
+  const root = join(scratch, 'dsh-sessions')
+  const ctx = new Context()
+  const fiber = ctx.plugin(JsonlSessionPersistence, { root })
+  for (let i = 0; i < 100 && ctx.get('sessionPersistence') === undefined; i++) await new Promise(resolve => setTimeout(resolve, 50))
+  const persistence = ctx.get('sessionPersistence')
+
+  const listed = (await claudeCodeAdapter.scan()).map(e => e.summary).filter(Boolean)
+  const target = listed.find(s => s.sessionKey === 'aaaa')
+  const request = { sessionKey: target.sessionKey, ref: target.ref, cwd: '' }
+  const cwdExists = () => true
+  const first = await importForeignSession(persistence, claudeCodeAdapter, request, { cwdExists })
+  const full = claudeCodeAdapter.discover().sessions.find(s => s.sourceId === 'aaaa')
+  check('5a. 首次导入写入会话，id 与 /migrate 的确定性 id 相同',
+    first.kind === 'ready' && first.created === true && first.sessionId === migrationSessionId(claudeCodeAdapter, full), JSON.stringify(first))
+  const second = await importForeignSession(persistence, claudeCodeAdapter, request, { cwdExists })
+  const batch = await importSessions(claudeCodeAdapter, root, [full])
+  check('5b. 再次选中直接打开不重写；/migrate 入口把它识别为已存在',
+    second.kind === 'ready' && second.created === false && second.sessionId === first.sessionId && batch.existing === 1 && batch.imported === 0)
+  const handle = await persistence.open(first.sessionId, 'read')
+  const { events } = await handle.read()
+  await handle.close()
+  check('5c. 落盘内容可经官方读取链读回（标题事件在内）',
+    events.some(e => e.type === 'user/message' && e.data.content?.[0]?.text === '小会话提问')
+    && events.some(e => e.type === 'session/title' && e.data.title === '小会话标题'))
+
+  const other = listed.find(s => s.sessionKey === 'bbbb')
+  const missingCwd = await importForeignSession(persistence, claudeCodeAdapter, { sessionKey: 'bbbb', ref: other.ref, cwd: '/w/cc' }, { cwdExists: () => false })
+  check('5d. 工作目录不存在时不导入', missingCwd.kind === 'cwd-missing' && missingCwd.cwd === '/w/cc'
+    && await persistence.stat(migrationSessionId(claudeCodeAdapter, { sourceId: 'bbbb' })) === undefined)
+  const skipped = await importForeignSession(persistence, claudeCodeAdapter, { sessionKey: 'gone', ref: join(home, 'gone.jsonl'), cwd: '' }, { cwdExists })
+  check('5e. 源文件已消失 → failed(missing)', skipped.kind === 'failed' && skipped.reason === 'missing')
+
+  // 写入失败：不留半截日志，结果如实报告
+  const discarded = []
+  const broken = {
+    stat: async () => undefined,
+    list: async () => [],
+    create: async () => ({ append: async () => { throw new Error('disk full') }, flush: async () => {}, close: async () => {} }),
+  }
+  const failed = await importForeignSession(broken, claudeCodeAdapter, { sessionKey: 'bbbb', ref: other.ref, cwd: '' }, { cwdExists, discard: id => discarded.push(id) })
+  check('5f. 写入失败时清理半截日志并报告原因',
+    failed.kind === 'failed' && failed.reason === 'write-failed' && failed.detail === 'disk full' && discarded.length === 1)
+
+  // 防重入：同一会话连续两次选中只写一次
+  let creates = 0
+  const counting = {
+    stat: async () => undefined, list: async () => [],
+    create: async header => { creates += 1; return persistence.create(header) },
+  }
+  const importer = createForeignImporter(() => counting, { cwdExists })
+  const a = importer.import(claudeCodeAdapter, { sessionKey: 'bbbb', ref: other.ref, cwd: '' })
+  const inFlight = importer.isImporting('claude-code', other.ref)
+  const b = importer.import(claudeCodeAdapter, { sessionKey: 'bbbb', ref: other.ref, cwd: '' })
+  const [ra, rb] = await Promise.all([a, b])
+  check('5g. 同一 ref 正在导入时再次选中并入同一次导入，只写一次',
+    inFlight && a === b && creates === 1 && ra.kind === 'ready' && rb === ra && !importer.isImporting('claude-code', other.ref))
+  const unavailable = await createForeignImporter(() => undefined).import(claudeCodeAdapter, request)
+  check('5h. 宿主没有持久化服务时报告失败而不是抛出', unavailable.kind === 'failed')
+  await Promise.resolve(fiber.dispose()).catch(() => {})
+}
+
 for (const [key, value] of Object.entries(savedEnv)) {
   if (value === undefined) delete process.env[key]
   else process.env[key] = value
