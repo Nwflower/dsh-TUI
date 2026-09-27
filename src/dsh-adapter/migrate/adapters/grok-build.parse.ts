@@ -16,6 +16,7 @@
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/grok-build.parse
  */
+import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { emptyStats } from '../parse/role-turns.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
@@ -86,9 +87,23 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
     if (kind === 'user') {
       // Tagged synthetic injections (system reminders, compaction meta, …)
       // are not the human's words; the default `human` tag is omitted.
-      if (row.synthetic_reason !== undefined && row.synthetic_reason !== 'human') continue
-      const prompt = blocksText(row.content)
+      if (row.synthetic_reason !== undefined && row.synthetic_reason !== 'human') {
+        stats.filtered += 1
+        continue
+      }
+      const raw = blocksText(row.content)
+      // Untagged injection: the environment block (`<user_info>`) that opens
+      // every session and follows every compaction.
+      if (isInjectedText(raw)) {
+        stats.filtered += 1
+        continue
+      }
+      // The human words sit inside `<user_query>`, possibly behind an
+      // interrupt or "sent while you were working" notice.
+      const prompt = unwrapUserText(raw)
       if (prompt === '') continue
+      // Speaking over a running turn cut that turn short.
+      if (row.prior_turn_interrupt !== undefined && current !== undefined) current.aborted = true
       current = { prompt, steps: [] }
       turns.push(current)
     } else if (kind === 'assistant') {

@@ -531,4 +531,22 @@ const gkParse = (rows, summary = gkSummary()) => parseGrokSession({ summaryJson:
     session.stats.droppedToolResults === 1 && session.stats.filtered === 1 && s2.results[0].text === '')
 }
 
+{
+  const session = gkParse([
+    gkUser('<system-reminder>\nThe following skills are available</system-reminder>', { synthetic_reason: 'system_reminder' }),
+    gkUser('<user_info>\nOS Version: windows\nWorkspace Path: D:\\w</user_info>'),
+    gkUser('<user_query>\n请看一下动画\n</user_query>', { prompt_index: 0 }),
+    gkAsst('在看'),
+    gkUser('The user interrupted the previous turn:\n<user_query>\ncontinue\n</user_query>\nMake sure to…', { prior_turn_interrupt: 'mid_turn_abort', prompt_index: 1 }),
+    gkAsst('继续'),
+    gkUser('The user sent a message while you were working:\n<user_query>\n顺便加测试\n</user_query>', { prompt_index: 2 }),
+    gkAsst('好'),
+  ])
+  check('8g. <user_query> 与中断/插话包装只留正文开轮',
+    session.turns.map(t => t.prompt).join('|') === '请看一下动画|continue|顺便加测试', session.turns.map(t => t.prompt).join('|'))
+  check('8h. 带 prior_turn_interrupt 的行把上一轮标为中断；插话不标',
+    session.turns[0].aborted === true && session.turns[1].aborted === undefined)
+  check('8i. 合成提醒与 <user_info> 不开轮，计入 filtered', session.stats.filtered === 2 && session.turns.length === 3)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
