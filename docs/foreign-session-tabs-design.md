@@ -1,7 +1,7 @@
 # dsh-tui 会话屏「外部来源」标签页 + 迁移源重构：详细设计
 
 - 日期：2026-09-26
-- 状态：决策已定，待实现
+- 状态：PR1（解析层 + sessionize v2）已实现，实现中的偏离已写回本文（§4.2、§4.3、§6）；PR2、PR3 待实现
 - 范围：`src/dsh-adapter/migrate/`（四个源的解析重构）、会话屏（`/resume` / `/agentview` / `/home`）新增外部来源标签页
 - 参考：dsh-chat-import（DSH 插件，同样做外部会话导入）的格式处理。本文只借鉴规则，**不依赖**该插件——用户不一定装了它
 
@@ -16,7 +16,7 @@
 4. **重构四个源**（claude-code / codex / zcode / grok-build）：参考 dsh-chat-import 的格式处理精度，全部在 TUI 内实现。**`/migrate` 和标签页两个入口统一使用新解析**，工具调用照常迁移（理由见 §1）。
 
 ### 非目标
-- **OMP**：本期不动。解析逻辑和导入结果保持现状，只做让它接入 sessionize v2 的机械适配（§4.3），也不在标签页里出现。
+- **OMP**：本期不动。解析逻辑保持现状，只做让它接入 sessionize v2 的机械适配（§4.3），也不在标签页里出现。导入结果唯一的变化来自 sessionize v2 对所有源统一补的空 system head（§6）。
 - 双向同步、增量续写，以及行级状态（「已导入」「源有更新」）。
 - 改动 `/migrate` 的交互（选择器、确认层、子进程编排）和 `dsh-tui migrate` CLI 的参数与输出格式。两者只会被动受益于解析质量的提升。
 - 为导入会话提供「重新导入 / 刷新」的入口。
@@ -146,33 +146,40 @@ interface ImportTurn {
   aborted?: boolean
 }
 interface ImportStep {
+  inputs: string[]                            // 轮中途进入这一步的 user 消息（isMeta、子代理报告）
   blocks: ({ type: 'text'; text: string } | { type: 'reasoning'; text: string }
          | { type: 'tool-call'; id: string; name: string; arguments: string })[]
-  results: { callId: string; content: ContentBlock[]; isError: boolean }[]
+  results: { callId: string; text: string; isError: boolean }[]   // 图片已换占位、超长已截断
   model?: string
 }
 ```
+
+实现说明：结果只保留文本（图片在解析阶段换成 `[image]`），sessionize 再包成 `ContentBlock[]`；`inputs` 是实现中新增的字段，用来承载模型在轮中途看到的机器上下文，取代「并入 step 之后的上下文」的原设想（§4.3）。
 
 CLI 的 dry-run 只用到了 `session.turns.length`（显示为「N messages」），改为调用 `messageCount(session)` 辅助函数，输出语义保持一致。
 
 ### 4.3 各源规则
 
 **claude-code**
-- `isMeta:true` 的 user 消息**不开新轮**，也不参与标题。实测 174 条，其中一半以上出现在一轮中间：skill 正文、`[Image: …]`、`Continue from where you left off.` 等。处理方式：并入当前 step 之后的上下文。如果做不到 wire 合法，就降级为下一个 assistant 步骤前的文本块，并计入 `stats.meta`。
+- **一次响应合并为一步**：Claude Code 把一次模型响应按内容块拆成多行、共用 `message.id`，中间还可能插入工具结果行（实测 57,475 行 assistant 对应 27,151 次响应）。同一轮内按 `message.id` 合并回一步。
+- `isMeta:true` 的 user 消息**不开新轮**，也不参与标题。实测之后 110 条紧跟模型回复、5 条是工具结果（skill 正文、`[Image: …]`、`Continue from where you left off.` 等），另有 61 条是本地命令的 caveat，之后没有模型回复。处理方式：作为**下一步的 `inputs`** 写入（上游允许 user/message 出现在轮内任意位置，wire 上是 tool 消息之后、下一个 assistant 之前的 user 消息，合法），计入 `stats.meta`；注入形态的 caveat 丢弃。
+- **命令回显**：`<command-name>` / `<command-message>` 还原成 `/name args` 提问；模型没有回复的命令轮（`/model`、`/clear` 等本地命令）不导入；`<local-command-stdout>` 等注入不开轮。
 - `tool_use` / `tool_result` 按 id 配对。结果总是在后面才到，要挂回 call 所在的 step，不能挂到最近一步。
 - **ghost retry 去重**：同一 call id 在相邻步骤里原样重发，且前一步没有结果时，删掉前一步。
-- `isCompactSummary` 和旧格式的 `type:'summary'` 转为压缩检查点。
+- `isCompactSummary` 转为压缩检查点。旧格式 2.0.x 的 `type:'summary'` 是写在文件头的一行叶子标题，前面没有可折叠的内容，**只当标题**，不转检查点（当检查点会退化成把标题作为第一条 user 消息注入）。
 - 标题优先级：`custom-title` **后到者胜** > 旧格式 `summary` > `ai-title` **取首个** > 首个真实提问。
 - 排除 `subagents/` 下的文件，以及文件名与记录中 `sessionId` 不一致的辅助 transcript。
 - thinking 块照旧保留；每步记录 `message.model`。
 
 **codex**
 - user 块过滤掉 `<` 开头的块，以及 `# AGENTS.md instructions` 块。后者实测 13 个会话的首条消息就是它，而现有实现对 user 块一律不过滤。
-- 读取 `function_call` / `custom_tool_call` 及对应的 `*_output`。`output` 是 `{"output": …}` JSON 字符串时取内层。
-- `reasoning.summary[].text` 是明文，缓冲后前置到下一步（`encrypted_content` 不碰）。这一条修正了现有文档中「reasoning 加密不可读」的说法。
+- 读取 `function_call` / `custom_tool_call` 及对应的 `*_output`。输出有三种形态：纯字符串、`{"output": …}` JSON 字符串（取内层）、`input_text` / `input_image` 块数组（实测 968/1045 条，是最常见的形态）。`custom_tool_call` 的 input 是自由格式（patch、JS 片段），包成 `{"input": …}` 保证参数是 JSON。
+- **步边界**：一次模型调用返回 reasoning、消息和调用，之后 harness 追加工具输出，所以出现输出之后的下一个模型产物开启新步。
+- `reasoning.summary[].text` 是明文，作为所属模型调用的 reasoning 块（`encrypted_content` 不碰）。这一条修正了现有文档中「reasoning 加密不可读」的说法。
+- `agent_message`（子代理回传给本线程的报告，实测 38 条）作为下一次模型调用的 `inputs`。
 - `compacted.payload.message` 转为检查点。`turn_aborted` 标记当前轮为 aborted。
 - 每个 `turn_context.model` 更新「当前模型」，写入其后的步骤。
-- 排除子代理 rollout：`thread_source='subagent'` 或 `source.subagent`。
+- 排除子代理 rollout：`thread_source='subagent'` 或 `source.subagent`。**只看首个 `session_meta`**：派生或 fork 的线程会在自己的 meta 之后重复父会话的 meta（连同继承的历史），cwd 同样只取首个。
 
 **grok-build**（实测行型如下）
 
@@ -187,13 +194,13 @@ CLI 的 dry-run 只用到了 `session.turns.length`（显示为「N messages」�
 | `tool_result`：`tool_call_id`、`content` 字符串、可选 `images` | 按 id 挂回对应 step；每张图片换成 `[image]` 占位 |
 | `backend_tool_call` | 计数，不映射 |
 
-同时保留现有的 v0（`role` 形态）兼容和 `GROK_HOME` 支持。
+同时保留现有的 v0（`role` 形态）兼容和 `GROK_HOME` 支持。实测 `summary.json` 没有 `generated_title`，只有 `session_summary`。
 
 **zcode**：只支持原维护者的存储 `~/.zcode/v2/sessions/<dir>/<taskId>.json`（`{ meta, messages }`），不读 `~/.zcode/cli/db/db.sqlite`，不引入 `node:sqlite`。
 - 本期保证：沿用现有字段映射，接入 §4.1 的注入过滤和标题归一，并产出 §4.2 的中间模型。
 - 待定：维护者本机没有这个格式的样本。实现者需要先拿到一个真实样本（向原维护者要，或自行安装 zcode 生成），确认 `messages` 里有没有工具调用和 reasoning 字段：有就按 §4.1 映射，没有就维持纯文本。fixtures 按确认后的字段合成。
 
-**omp**：本期不动。只把现有 adapter 产出的 role 列表机械转换成 `ImportTurn[]`（user 开轮，其后的 assistant 各占一步），好让 sessionize v2 只需维护一种输入。导入结果与现在逐事件一致，`verify-migrate` 中现有的 omp 断言必须原样通过。
+**omp**：本期不动。只把现有 adapter 产出的 role 列表机械转换成 `ImportTurn[]`（user 开轮，其后的 assistant 各占一步），好让 sessionize v2 只需维护一种输入。除 §6 统一补的空 system head 外，导入结果与现在逐事件一致，`verify-migrate` 中现有的 omp 断言原样通过。
 
 ### 4.4 体量保护
 - 单个工具结果文本上限 64KB，超出部分截断，末尾加 `…[truncated N bytes]`。图片一律用占位符，不把 base64 写进日志。
@@ -233,20 +240,24 @@ CLI 的 dry-run 只用到了 `session.turns.length`（显示为「N messages」�
 仍然使用官方的 `Session.create` + `append`，信封字段（seq、time、id）由上游生成。事件序列：
 
 ```
-[compaction/start → compaction/summary → user/message(检查点, surfaceOp replace) → compaction/end]   ← 仅当该轮带 compaction，位于 turn/start 之前
+[compaction/start → compaction/summary → user/message(检查点) → compaction/end]   ← 仅当该轮带 compaction，位于 turn/start 之前
 turn/start
-  user/message                        （prompt 非空时）
   per step:
     step/start
+    system/message { content: [] }    （仅会话首步：空 system head）
+    user/message                      （仅首步，prompt 非空时）
+    user/message × inputs             （轮中途的机器上下文）
     assistant/message { content: blocks（含 tool-call 块）, stream: [], source: { provider:'migrated:<agent>', model } }
     tool/call × n
-    tool/result × n                   （与 call 一一对应，缺的补空）
+    tool/result × n                   （与 call 一一对应，缺的补空；sourceEventSeqs 引用对应 tool/call）
     step/end
 turn/end { reason: aborted ? { kind:'aborted', reason:{ kind:'legacy' } } : { kind:'completed' } }
 session/title                          （仅显式标题，末尾写入）
 ```
 
-- 检查点事件的形态（`shadowedSeqs`、`shadowedRange`、`source: { kind:'plugin', plugin:'compact', compactionId }`）参照 dsh-chat-import `lib/convert/events.mjs` 中已在宿主上验证过的写法。实现时以上游 `Session.append` 的校验和 resume 回归为准，**不照抄**它手写的 seq 和信封。
+- **与 live loop 同序**：提问是首步的 user 消息（原设计写在 step/start 之前）。没有步的轮直接在轮内写提问；没有步的首轮补一个只装 head 与提问的步。
+- **空 system head**（实现中新增）：live loop 把 surface 第 0 节点留给系统提示词，续聊时用 replace 写入。导入日志此前没有 head，续聊时提示词只能追加在导入历史之后，而 pi-ai 适配器只提取「首条 system」，提示词会被当作一条 user 消息发出。空 head 不投影为消息，重读导入会话的内容不变。
+- **检查点形态以 v4 上游为准**：dsh-chat-import 的写法基于旧格式，v4 下字段已变。检查点 user/message 的 `source` 为 `{ kind:'compact-checkpoint', compactionId }`，`surfaceOp` 为 `{ op:'replace', startSeq, endSeq }`，替换 head 之后的全部 surface 节点，`sourceEventSeqs` 等于 `shadowedSeqs`；事务 `turn: null`（独立事务）。@deepseek-ai/dsh-compaction 不是本包依赖，事件按其契约结构化书写，由 `Session.append` 在运行时校验。边界之前没有可折叠节点时不发事务，摘要落为该轮开头的一条 user 消息；会话停在压缩点、之后既无提问也无回复时不产生空轮。
 - **验收底线**：导入的会话用 `resumeTo` 打开后，再发一轮新消息，生成的 wire 消息序列要合法（每个 tool_call 都有对应的 tool 消息，中间不插 assistant）。
 
 ---
