@@ -482,4 +482,30 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
     session.stats.meta === 3 && session.stats.filtered === 1, JSON.stringify(session.stats))
 }
 
+// ── 8. grok-build ───────────────────────────────────────────────────────
+const { parseGrokSession } = await import('../src/dsh-adapter/migrate/adapters/grok-build.parse.js')
+const gkSummary = (extra = {}) => JSON.stringify({
+  info: { id: 'grok-session-1', cwd: '/w/grok' }, session_summary: 'Grok 摘要标题', created_at: '2026-09-01T00:00:00Z', ...extra,
+})
+const gkUser = (text, extra = {}) => JSON.stringify({ type: 'user', content: [{ type: 'text', text }], ...extra })
+const gkAsst = (content, extra = {}) => JSON.stringify({ type: 'assistant', content, model_id: 'grok-x', ...extra })
+const gkReason = text => JSON.stringify({ type: 'reasoning', id: 'rs', summary: [{ type: 'summary_text', text }], encrypted_content: 'opaque' })
+const gkParse = (rows, summary = gkSummary()) => parseGrokSession({ summaryJson: summary, chatHistory: rows.join('\n') })
+{
+  const session = gkParse([
+    JSON.stringify({ type: 'system', content: 'system prompt' }),
+    gkUser('第一问'),
+    gkReason('先想'),
+    gkAsst('第一答'),
+    JSON.stringify({ role: 'user', content: 'v0 形态提问' }),
+    JSON.stringify({ role: 'assistant', content: 'v0 形态回答' }),
+  ])
+  check('8a. reasoning 行前置到下一个 assistant 步；model 取 model_id',
+    JSON.stringify(session.turns[0].steps[0].blocks) === JSON.stringify([{ type: 'reasoning', text: '先想' }, { type: 'text', text: '第一答' }])
+    && session.turns[0].steps[0].model === 'grok-x')
+  check('8b. 兼容 v0 的 {role, content} 形态', session.turns[1]?.prompt === 'v0 形态提问' && session.turns[1].steps[0].blocks[0].text === 'v0 形态回答')
+  check('8c. sourceId 与 cwd 取 summary.json 的 info；缺 info 的会话不成立',
+    session.sourceId === 'grok-session-1' && session.cwd === '/w/grok' && gkParse([gkUser('q')], JSON.stringify({ info: null })) === undefined)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
