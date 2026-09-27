@@ -284,4 +284,24 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
     steps.length === 3 && steps[1].blocks[0].id === 'tu_diff' && steps[2].blocks[0].id === 'tu_diff#2')
 }
 
+{
+  // 压缩边界：isCompactSummary 的 user 行是摘要，不是提问
+  const session = ccParse([
+    ccUser('压缩前的提问'),
+    ccAsst('msg_1', [{ type: 'text', text: '压缩前的回答' }]),
+    ccUser('This session is being continued from a previous conversation. Summary: 做了 A 和 B', { isCompactSummary: true }),
+    // 压缩后源 agent 自动续跑：没有人类提问，只有 isMeta 与回复
+    ccUser('Continue from where you left off.', { isMeta: true }),
+    ccAsst('msg_2', [{ type: 'text', text: '继续做 C' }]),
+    ccUser('压缩后的提问'),
+    ccAsst('msg_3', [{ type: 'text', text: '好的' }]),
+    ccUser('第二次摘要', { isCompactSummary: true }),
+  ])
+  const shape = session.turns.map(turn => `${turn.prompt || '∅'}${turn.compaction ? `[${turn.compaction.summary.slice(0, 5)}@${turn.compaction.model}]` : ''}:${turn.steps.length}`)
+  check('6n. 摘要挂到边界后的下一轮（无提问时开空提问轮），模型取边界前最后一步',
+    shape.join(' | ') === '压缩前的提问:1 | ∅[This @claude-x]:1 | 压缩后的提问:1 | ∅[第二次摘要@claude-x]:0', shape.join(' | '))
+  check('6o. 压缩后续跑的 isMeta 进入空提问轮首步的输入',
+    session.turns[1].steps[0].inputs[0] === 'Continue from where you left off.')
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)

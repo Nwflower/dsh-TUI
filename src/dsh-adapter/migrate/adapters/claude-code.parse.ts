@@ -19,13 +19,18 @@
  * them (local commands); local-command output and other injection is
  * dropped. Everything dropped is counted in `stats.filtered`.
  *
+ * A `user` line flagged `isCompactSummary` is a compaction boundary: its
+ * text becomes the checkpoint in front of the next turn (sessionize writes
+ * the native compaction transaction). The legacy 2.0.x `summary` record is
+ * a one-line leaf title written at the head of a file, not a boundary.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/claude-code.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { isInjectedText, stripSystemReminders } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
-import type { ImportStep, ImportTurn, MigrationSession } from '../types.js'
+import type { ImportCompaction, ImportStep, ImportTurn, MigrationSession } from '../types.js'
 
 /** What the adapter knows about a transcript besides its text. */
 export interface ClaudeTranscriptInput {
@@ -136,13 +141,17 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
   let startedAt = 0
   let lineCwd: string | undefined
   const calls = new CallIndex()
+  /** A compaction summary waiting for the turn that follows the boundary. */
+  let pendingCompaction: ImportCompaction | undefined
+  let lastModel: string | undefined
   /** isMeta texts waiting for the next step of the current turn. */
   let pendingInputs: string[] = []
   /** Turns opened by a slash-command echo rather than typed words. */
   const commandTurns = new Set<ImportTurn>()
 
   const openTurn = (prompt: string): void => {
-    current = { prompt, steps: [] }
+    current = pendingCompaction === undefined ? { prompt, steps: [] } : { prompt, compaction: pendingCompaction, steps: [] }
+    pendingCompaction = undefined
     turns.push(current)
     stepOfMessage = new Map()
   }
@@ -152,6 +161,7 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     const turn = current!
     const messageId = typeof message.id === 'string' && message.id !== '' ? message.id : undefined
     let step = messageId === undefined ? undefined : stepOfMessage.get(messageId)
+    if (typeof message.model === 'string' && message.model !== '') lastModel = message.model
     if (step === undefined) {
       step = newStep(typeof message.model === 'string' && message.model !== '' ? message.model : undefined)
       step.inputs = pendingInputs
@@ -232,24 +242,37 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     if (typeof record.cwd === 'string' && record.cwd !== '') lineCwd = record.cwd
     if (startedAt === 0) startedAt = toMillis(record.timestamp)
     if (type === 'user') {
-      if (isToolResultLine(message.content)) attachResults(message.content as unknown[])
-      else acceptUserText(record, message.content)
+      if (isToolResultLine(message.content)) {
+        attachResults(message.content as unknown[])
+      } else if (record.isCompactSummary === true) {
+        // Compaction boundary: the summary becomes a native checkpoint in
+        // front of the next turn; the turn in progress is over.
+        const summary = stripSystemReminders(textOf(message.content))
+        if (summary !== '') {
+          pendingCompaction = lastModel === undefined ? { summary } : { summary, model: lastModel }
+          current = undefined
+        }
+      } else {
+        acceptUserText(record, message.content)
+      }
       continue
     }
     appendAssistant(message)
   }
   stats.filtered += pendingInputs.length
+  // The transcript stopped right at a boundary: keep the checkpoint.
+  if (pendingCompaction !== undefined) turns.push({ prompt: '', compaction: pendingCompaction, steps: [] })
 
   // A response that produced nothing importable leaves no step behind, and
   // a slash command the model never answered (/model, /clear, …) is local
   // housekeeping, not conversation.
   for (const turn of turns) turn.steps = turn.steps.filter(step => step.blocks.length > 0 || step.inputs.length > 0)
   turns = turns.filter(turn => {
-    if (commandTurns.has(turn) && turn.steps.length === 0) {
+    if (commandTurns.has(turn) && turn.steps.length === 0 && turn.compaction === undefined) {
       stats.filtered += 1
       return false
     }
-    return turn.prompt !== '' || turn.steps.length > 0
+    return turn.prompt !== '' || turn.steps.length > 0 || turn.compaction !== undefined
   })
   for (const turn of turns) dropGhostRetries(turn.steps)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
