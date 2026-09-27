@@ -324,4 +324,31 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
 check('6t. 记录 sessionId 与文件名不符的辅助 transcript 不成会话',
   parseClaudeTranscript({ raw: [ccUser('子任务'), ccAsst('m', 'x')].join('\n'), fileStem: 'agent-a1', fallbackCwd: '/f' }) === undefined)
 
+// ── 7. codex ────────────────────────────────────────────────────────────
+const { parseCodexRollout } = await import('../src/dsh-adapter/migrate/adapters/codex.parse.js')
+const cxRow = (type, payload) => JSON.stringify({ timestamp: '2026-09-01T00:00:00Z', type, payload })
+const cxItem = payload => cxRow('response_item', payload)
+const cxUser = (...texts) => cxItem({ type: 'message', role: 'user', content: texts.map(text => ({ type: 'input_text', text })) })
+const cxAsst = text => cxItem({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] })
+const cxMeta = (extra = {}) => cxRow('session_meta', { id: 'rollout-id', cwd: '/w/codex', timestamp: '2026-09-01T00:00:00Z', source: 'cli', thread_source: 'user', ...extra })
+const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rollout-id' })
+{
+  const session = cxParse([
+    cxMeta(),
+    cxRow('turn_context', { model: 'gpt-a' }),
+    cxUser('第一问'),
+    cxAsst('第一答'),
+    cxRow('event_msg', { type: 'agent_message', message: '重复的 UI 事件' }),
+    cxRow('turn_context', { model: 'gpt-b' }),
+    cxUser('第二问'),
+    cxAsst('第二答'),
+  ])
+  check('7a. user 开轮、assistant 成步；event_msg 不重复计入',
+    session.turns.map(t => `${t.prompt}:${t.steps.map(s => s.blocks[0].text).join('+')}`).join('|') === '第一问:第一答|第二问:第二答')
+  check('7b. turn_context 的 model 写到其后的步上（中途换模型）',
+    session.turns[0].steps[0].model === 'gpt-a' && session.turns[1].steps[0].model === 'gpt-b')
+  check('7c. cwd 取 session_meta；没有 cwd 的 rollout 不成会话',
+    session.cwd === '/w/codex' && cxParse([cxUser('q'), cxAsst('a')]) === undefined)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
