@@ -9,12 +9,16 @@
  * between them). Those lines are merged back into one step: one step is one
  * model call.
  *
+ * Tool results arrive as `user` lines of `tool_result` blocks, usually
+ * after every tool_use of the response has been written; each is paired to
+ * the step that made the call by `tool_use_id` (never to the newest step).
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/claude-code.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { stripSystemReminders } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
-import { newStep } from '../parse/tools.js'
+import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
 import type { ImportStep, ImportTurn, MigrationSession } from '../types.js'
 
 /** What the adapter knows about a transcript besides its text. */
@@ -41,6 +45,20 @@ function textOf(content: unknown): string {
   return parts.join('\n\n')
 }
 
+/** Model-facing text of a tool_result's content: a string, or text blocks
+ *  with each image replaced by a placeholder. */
+function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+    else if (block.type === 'image') parts.push(IMAGE_PLACEHOLDER)
+  }
+  return parts.join('\n')
+}
+
 /** Whether a user line is a tool-result carrier rather than a prompt. */
 function isToolResultLine(content: unknown): boolean {
   return Array.isArray(content) && content.some(block => isRecord(block) && block.type === 'tool_result')
@@ -59,6 +77,7 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
   let stepOfMessage = new Map<string, ImportStep>()
   let startedAt = 0
   let lineCwd: string | undefined
+  const calls = new CallIndex()
 
   const openTurn = (prompt: string): void => {
     current = { prompt, steps: [] }
@@ -90,7 +109,18 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
         // The trace lives in `thinking` (not `text`); accept both.
         const text = typeof block.thinking === 'string' ? block.thinking : typeof block.text === 'string' ? block.text : ''
         if (text !== '') step.blocks.push({ type: 'reasoning', text })
+      } else if (block.type === 'tool_use' && typeof block.id === 'string' && block.id !== '') {
+        const name = typeof block.name === 'string' && block.name !== '' ? block.name : 'unknown'
+        step.blocks.push({ type: 'tool-call', id: block.id, name, arguments: JSON.stringify(block.input ?? {}) })
       }
+    }
+    calls.register(step)
+  }
+
+  const attachResults = (content: unknown[]): void => {
+    for (const block of content) {
+      if (!isRecord(block) || block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
+      calls.attach(block.tool_use_id, toolResultText(block.content), block.is_error === true)
     }
   }
 
@@ -105,7 +135,10 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     if (typeof record.cwd === 'string' && record.cwd !== '') lineCwd = record.cwd
     if (startedAt === 0) startedAt = toMillis(record.timestamp)
     if (type === 'user') {
-      if (isToolResultLine(message.content)) continue
+      if (isToolResultLine(message.content)) {
+        attachResults(message.content as unknown[])
+        continue
+      }
       const prompt = stripSystemReminders(textOf(message.content))
       if (prompt === '') continue
       openTurn(prompt)
@@ -117,6 +150,7 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
   // A response that produced nothing importable leaves no step behind.
   for (const turn of turns) turn.steps = turn.steps.filter(step => step.blocks.length > 0)
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
+  stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (!turns.some(turn => turn.prompt !== '')) return undefined
 
   // cwd precedence: the per-line `cwd` field → the first prompt's

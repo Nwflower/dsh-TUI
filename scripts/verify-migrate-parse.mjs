@@ -204,4 +204,29 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
   check('6d. 没有任何人类提问的 transcript 不成会话', ccParse([ccAsst('m', [{ type: 'text', text: '独白' }])]) === undefined)
 }
 
+{
+  // Claude 形态：一次响应里两个 tool_use 各占一行，结果在两行之后才到、乱序，
+  // 且一个是字符串内容、一个是含图片的块数组；另有一条找不到调用的孤儿结果
+  const session = ccParse([
+    ccUser('改两个文件'),
+    ccAsst('msg_1', [{ type: 'text', text: '先读' }]),
+    ccAsst('msg_1', [{ type: 'tool_use', id: 'tu_a', name: 'Read', input: { file_path: 'a.ts' } }]),
+    ccAsst('msg_1', [{ type: 'tool_use', id: 'tu_b', name: 'Read', input: { file_path: 'b.ts' } }]),
+    ccUser([{ type: 'tool_result', tool_use_id: 'tu_b', content: [{ type: 'text', text: 'B 正文' }, { type: 'image', source: { data: 'AAAA' } }] }]),
+    ccUser([{ type: 'tool_result', tool_use_id: 'tu_a', content: 'A 正文', is_error: true }]),
+    ccUser([{ type: 'tool_result', tool_use_id: 'tu_ghost', content: '孤儿' }]),
+    ccAsst('msg_2', [{ type: 'tool_use', id: 'tu_c', name: 'Bash', input: { command: 'ls' } }]),
+    ccAsst('msg_3', [{ type: 'text', text: '改完了' }]),
+  ])
+  const [step1, step2, step3] = session.turns[0].steps
+  check('6e. tool_use 成为 tool-call 块，参数为 input 的 JSON',
+    step1.blocks.filter(b => b.type === 'tool-call').map(b => `${b.id}:${b.name}:${b.arguments}`).join('|')
+      === 'tu_a:Read:{"file_path":"a.ts"}|tu_b:Read:{"file_path":"b.ts"}')
+  check('6f. 结果按 id 挂回发起调用的步、按调用顺序；字符串与块数组两种形态都取文本',
+    step1.results.map(r => `${r.callId}:${r.text}:${r.isError}`).join('|') === 'tu_a:A 正文:true|tu_b:B 正文\n[image]:false',
+    JSON.stringify(step1.results))
+  check('6g. 没有结果的调用补空结果；孤儿结果计入 droppedToolResults',
+    step2.results.length === 1 && step2.results[0].text === '' && session.stats.droppedToolResults === 1 && step3.results.length === 0)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
