@@ -2,7 +2,7 @@
 import type { ChatRow, AgentStatus, TokenUsage, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, ChannelSelection } from './channel-view.js'
 import type { SpinnerMode, ToolBackground, ScrollGutterMode, PageMarginSetting, StatusBarConfig, SessionModeSpec } from './channel-display.js'
 import type { LocalCommand, CommandCompletion, BalanceResult, FileCandidate, RecapOutcome } from './channel-catalog.js'
-import type { TuiRewindMode, SessionTreeData, SessionSummary, PreviewEntry } from './channel-session.js'
+import type { TuiRewindMode, SessionTreeData, SessionSummary, PreviewEntry, ForeignSource, ForeignSessionRow, ForeignImportOutcome } from './channel-session.js'
 import type { TuiWorkspaceTarget, TuiWorkspaceCommand, TuiWorkspaceCommandResult, TuiWorkspaceEntry } from './channel-workspace.js'
 import type { ProviderSetupHost, OAuthProviderStatus, SettingsHost, TuiSettingsSection } from './channel-settings.js'
 
@@ -454,6 +454,19 @@ export interface ChannelUi {
   /** Every session the persistence backend stores, classified and unfiltered
    *  — the browser (`/resume`) decides which of them a given view shows. */
   listSessions(onEnriched?: (summary: SessionSummary) => void): Promise<readonly SessionSummary[]>
+  /** Foreign sources with data, newest activity first, as last known (the
+   *  persisted catalog) — synchronous, so the tab strip paints at once. */
+  foreignSources(): readonly ForeignSource[]
+  /** Re-probe which foreign sources have data (a name-only walk). */
+  refreshForeignSources(): Promise<readonly ForeignSource[]>
+  /** One source's conversations as last known, newest first — synchronous. */
+  foreignSessions(agentId: string): readonly ForeignSessionRow[]
+  /** Rescan one source, reusing unchanged summaries; resolves to the newest
+   *  published list (a superseded rescan resolves to the newer result). */
+  refreshForeignSessions(agentId: string, onEntry?: (row: ForeignSessionRow) => void): Promise<readonly ForeignSessionRow[]>
+  /** Import one foreign conversation unless already present; a repeat
+   *  request for a conversation being imported joins the running import. */
+  importForeignSession(agentId: string, ref: string): Promise<ForeignImportOutcome>
   /** Trailing exchanges of a persisted session, for the browser's preview. */
   previewSession(sessionId: string): Promise<readonly PreviewEntry[]>
   /** Mark a session for `dsh-tui --resume` on the next launch. */

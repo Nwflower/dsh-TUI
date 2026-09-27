@@ -236,3 +236,36 @@ export interface PreviewEntry {
   readonly text: string
   readonly at: number | undefined
 }
+
+/** A foreign coding agent whose local conversations can be browsed
+ *  (session screen source tabs). Only sources with data are listed. */
+export interface ForeignSource {
+  readonly agentId: string
+  readonly label: string
+  /** Candidate conversation files found (a few may not be conversations). */
+  readonly count: number
+  /** Newest activity in the source; the tabs sort by it, newest first. */
+  readonly newestMtimeMs: number
+}
+
+/** One foreign conversation as listed in a source tab. */
+export interface ForeignSessionRow {
+  readonly agentId: string
+  /** Stable source id; the imported session's id derives from it. */
+  readonly sessionKey: string
+  /** Opaque locator handed back to importForeignSession. */
+  readonly ref: string
+  readonly title: string
+  /** '' when the source did not record one. */
+  readonly cwd: string
+  readonly lastMessageAt: number
+  readonly createdAt: number
+}
+
+/** What selecting a foreign conversation led to. */
+export type ForeignImportOutcome =
+  /** Imported now (`created`) or already present: open `sessionId`. */
+  | { readonly kind: 'ready', readonly sessionId: string, readonly created: boolean }
+  /** Its working directory is gone; nothing was imported. */
+  | { readonly kind: 'cwd-missing', readonly cwd: string }
+  | { readonly kind: 'failed', readonly reason: 'missing' | 'too-large' | 'not-a-session' | 'write-failed' | 'unknown-source', readonly detail?: string }

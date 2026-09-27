@@ -350,6 +350,46 @@ const keyed = entries => entries.filter(e => e.summary !== null).map(e => e.summ
   await Promise.resolve(fiber.dispose()).catch(() => {})
 }
 
+// ── 6. channel facade（foreign-sessions）────────────────────────────────
+{
+  const { createForeignSessionActions } = await import('../src/dsh-adapter/channel/foreign-sessions.js')
+  const { CHANNEL_UI_EFFECTS } = await import('../src/adapter/channel/ui-policy.js')
+  const writes = []
+  const persistence = {
+    stat: async () => undefined,
+    list: async () => [],
+    create: async header => {
+      writes.push(header.id)
+      return { append: async () => {}, flush: async () => {}, close: async () => {} }
+    },
+  }
+  // 一个工作目录真实存在的会话（其余 fixture 的 cwd 是虚构路径）
+  writeFileSync(join(home, '.claude', 'projects', '-w-cc', 'dddd.jsonl'), jsonl([
+    { type: 'user', sessionId: 'dddd', cwd: home, timestamp: '2026-09-02T00:00:00Z', message: { role: 'user', content: '可导入的会话' } },
+    { type: 'assistant', sessionId: 'dddd', cwd: home, timestamp: '2026-09-02T00:00:01Z', message: { id: 'md', role: 'assistant', content: [{ type: 'text', text: '好' }] } },
+  ]))
+  const controller = new AbortController()
+  const actions = createForeignSessionActions({ get: name => name === 'sessionPersistence' ? persistence : undefined }, { owner: { signal: controller.signal } })
+  const sources = await actions.refreshForeignSources()
+  check('6a. facade 探测列出四个可浏览来源（不含 omp）',
+    sources.map(s => s.agentId).sort().join(',') === 'claude-code,codex,grok-build,zcode' && actions.foreignSources().length === 4)
+  const streamed = []
+  const rows = await actions.refreshForeignSessions('claude-code', row => streamed.push(row.sessionKey))
+  check('6b. 会话刷新逐条回报并返回按时间降序的列表', rows.length === 3 && streamed.length === 3 && actions.foreignSessions('claude-code')[0].sessionKey === 'dddd')
+  const target = rows.find(row => row.sessionKey === 'bbbb')
+  const missing = await actions.importForeignSession('claude-code', target.ref)
+  check('6c. 行上的 cwd 不存在时不导入', missing.kind === 'cwd-missing' && missing.cwd === '/w/cc' && writes.length === 0)
+  const outcome = await actions.importForeignSession('claude-code', rows.find(row => row.sessionKey === 'dddd').ref)
+  check('6c2. 导入经宿主 sessionPersistence 写入', outcome.kind === 'ready' && outcome.created === true && writes.length === 1)
+  const unknown = await actions.importForeignSession('omp', target.ref)
+  check('6d. 不可浏览的来源报告 unknown-source', unknown.kind === 'failed' && unknown.reason === 'unknown-source')
+  controller.abort()
+  const afterAbort = await actions.refreshForeignSessions('claude-code')
+  check('6e. channel 释放后的刷新返回上次结果而不抛出', afterAbort.length === 3)
+  const classes = ['foreignSources', 'refreshForeignSources', 'foreignSessions', 'refreshForeignSessions', 'importForeignSession'].map(name => CHANNEL_UI_EFFECTS[name])
+  check('6f. 五个新方法都登记了副作用分类（导入为 mutate）', classes.join(',') === 'read-only,read-only,read-only,read-only,mutate')
+}
+
 for (const [key, value] of Object.entries(savedEnv)) {
   if (value === undefined) delete process.env[key]
   else process.env[key] = value
