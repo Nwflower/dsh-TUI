@@ -208,6 +208,13 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
       }
       continue
     }
+    // The only event_msg that carries meaning the response items lack: the
+    // turn was interrupted (the recorded reason is always a coarse
+    // 'interrupted').
+    if (record.type === 'event_msg' && payload.type === 'turn_aborted') {
+      if (current !== undefined) current.aborted = true
+      continue
+    }
     if (record.type === 'turn_context') {
       if (typeof payload.model === 'string' && payload.model !== '') model = payload.model
       continue

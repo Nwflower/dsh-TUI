@@ -436,4 +436,17 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
     shape.join(' | ') === '大任务:1 | ∅[交接摘要@gpt-c]:2 | 下一个问题:1 | ∅[尾部摘要@gpt-c]:0', shape.join(' | '))
 }
 
+{
+  const session = cxParse([
+    cxMeta(),
+    cxUser('做一半被打断'),
+    cxAsst('开始……'),
+    cxRow('event_msg', { type: 'turn_aborted', reason: 'interrupted' }),
+    cxUser('换个方向'),
+    cxAsst('好'),
+  ])
+  check('7n. turn_aborted 标记当前轮为中断，后续轮不受影响',
+    session.turns[0].aborted === true && session.turns[1].aborted === undefined)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
