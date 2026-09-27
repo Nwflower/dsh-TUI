@@ -1,4 +1,4 @@
-Closes #<!-- issue 号；改动代码的 PR 必须关联 issue -->
+Closes #<!-- issue 号；改动代码的 PR 必须关联 issue。纯文档 PR、或维护者打了 no-issue-needed 标签的 PR 可删掉这一行 -->
 
 ## Why the change
 
