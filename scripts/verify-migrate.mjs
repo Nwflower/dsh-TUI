@@ -105,9 +105,14 @@ const fakeAdapter = { id: 'fixture', label: 'Fixture', roots: () => [], discover
   check('1a. header 携带 cwd 与当前格式版本', header.cwd === first.cwd && header.version === SESSION_FORMAT_VERSION, `v${header.version}`)
   check('1b. turn 配对：2 轮 = 2×start + 2×end',
     types.filter(t => t === 'turn/start').length === 2 && types.filter(t => t === 'turn/end').length === 2)
-  check('1c. 一 user 一 assistant 的常规轮',
-    types.join(' ') === 'turn/start user/message step/start assistant/message step/end turn/end turn/start user/message step/start assistant/message step/end turn/end',
+  // 与 live loop 同序：提问是首步的 user 消息；首步先写空 system head（surface 第 0 节点）
+  check('1c. 一 user 一 assistant 的常规轮（首步带空 system head）',
+    types.join(' ') === 'turn/start step/start system/message user/message assistant/message step/end turn/end turn/start step/start user/message assistant/message step/end turn/end',
     types.join(','))
+  const head = events.find(event => event.type === 'system/message')
+  check('1c2. head 为空内容的 system-prompt 消息且只写一次',
+    head?.data?.message?.content?.length === 0 && head?.data?.message?.source?.kind === 'system-prompt'
+    && types.filter(t => t === 'system/message').length === 1)
   const assistant = events.find(event => event.type === 'assistant/message')
   const blocks = assistant?.data?.message?.content ?? []
   check('1d. reasoning 块先于正文块',
@@ -171,6 +176,24 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   const reFlat = reRestored.deriveMessages().map(m => m.content.map(b => b.text ?? '').join('')).join('|')
   check('3a. 续聊后新旧消息同在', reFlat.includes('你好，世界——第一轮 🎏') && reFlat.includes('续聊：迁移之后继续提问'))
   await reHandle.close()
+
+  // 3b. 续聊首步 live loop 会把渲染后的系统提示词「替换」进 head（surface 第 0 节点）。
+  // 照它的写法替换一次：系统提示词必须落在第 0 位，而不是接在导入历史之后——
+  // 否则 pi-ai 这类只提取「首条 system」的适配器会把它当成一条 user 消息发出。
+  {
+    const { createSystemMessage } = await import('@deepseek-ai/dsh-llm')
+    const resumed = Session.create(id, reRead.events, reHandle.header)
+    const headSeq = reRead.events.find(event => event.type === 'system/message')?.seq
+    const nextTurn = reRead.events.filter(event => event.type === 'turn/end').length + 1
+    resumed.append('turn/start', { turn: nextTurn })
+    resumed.append('step/start', { turn: nextTurn, step: 1 })
+    resumed.append('system/message', { turn: nextTurn, step: 1, message: createSystemMessage('SYSTEM PROMPT') },
+      { surfaceOp: { op: 'replace', startSeq: headSeq, endSeq: headSeq }, sourceEventSeqs: [headSeq] })
+    const roles = resumed.deriveMessages().map(m => m.role)
+    check('3b. 续聊时系统提示词替换进 head、位于第 0 位',
+      headSeq !== undefined && roles[0] === 'system' && roles.filter(r => r === 'system').length === 1 && roles[1] === 'user',
+      roles.join(','))
+  }
   await Promise.resolve(readFiber.dispose()).catch(() => {})
 }
 
@@ -200,7 +223,7 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     const id = SessionId(migrationUuid(`fixture:${sessions[1].sourceId}`))
     const { events } = sessionize(id, 'fixture', sessions[1])
     const types = events.map(e => e.type).join(' ')
-    const expected = 'turn/start user/message step/start assistant/message step/end step/start assistant/message step/end step/start assistant/message step/end turn/end turn/start user/message turn/end'
+    const expected = 'turn/start step/start system/message user/message assistant/message step/end step/start assistant/message step/end step/start assistant/message step/end turn/end turn/start user/message turn/end'
     check('4c1. 一 user 三 assistant + 尾 user 的事件全序', types === expected, types)
   }
   // 夹具 3：孤立 assistant 开头（无 user 的首轮，一个 step 无 user/message）
@@ -209,7 +232,15 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     const { events } = sessionize(id, 'fixture', sessions[2])
     const types = events.map(e => e.type).join(' ')
     check('4c2. 孤立 assistant 开头的事件全序',
-      types === 'turn/start step/start assistant/message step/end turn/end', types)
+      types === 'turn/start step/start system/message assistant/message step/end turn/end', types)
+  }
+  // 只有一条无回复提问的会话：head 需要打开的步，首轮补一个只装 head 与提问的步
+  {
+    const lone = { ...sessions[1], turns: fromRoleTurns([{ role: 'user', text: '只有提问', time: 0 }]) }
+    const id = SessionId(migrationUuid('fixture:lone'))
+    const types = sessionize(id, 'fixture', lone).events.map(e => e.type).join(' ')
+    check('4c2b. 无步首轮：head 与提问装在同一步',
+      types === 'turn/start step/start system/message user/message step/end turn/end', types)
   }
   // 夹具 2 端到端：restore 后 5 条消息且末位是 user（尾问保留）
   {
