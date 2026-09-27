@@ -19,6 +19,7 @@
 import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { emptyStats } from '../parse/role-turns.js'
+import { normalizeTitle } from '../parse/title.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
 import type { ImportCompaction, ImportTurn, MigrationSession } from '../types.js'
 
@@ -73,11 +74,10 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
   const { id, cwd } = summaryDoc.info
   if (typeof id !== 'string' || id === '' || typeof cwd !== 'string' || cwd === '') return undefined
   const startedAt = toMillis(summaryDoc.created_at) || toMillis(summaryDoc.updated_at)
-  const generatedTitle = summaryDoc.generated_title
-  const sessionSummary = summaryDoc.session_summary
-  const title = typeof generatedTitle === 'string' && generatedTitle !== ''
-    ? generatedTitle
-    : typeof sessionSummary === 'string' && sessionSummary !== '' ? sessionSummary : undefined
+  // Title authority: generated_title > session_summary (both the source's
+  // own, written to the log) > the first real prompt (fallback, not written).
+  const ownTitle = normalizeTitle([summaryDoc.generated_title, summaryDoc.session_summary]
+    .find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim() !== ''))
 
   const { records, badLines } = parseJsonl(input.chatHistory)
   const stats = { ...emptyStats(), badLines }
@@ -165,5 +165,6 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0 || turn.compaction !== undefined)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (!turns.some(turn => turn.prompt !== '')) return undefined
-  return { sourceId: id, cwd, ...(title === undefined ? {} : { title }), titleExplicit: false, startedAt, turns, stats }
+  const title = ownTitle !== '' ? ownTitle : normalizeTitle(turns.find(turn => turn.prompt !== '')?.prompt)
+  return { sourceId: id, cwd, ...(title === '' ? {} : { title }), titleExplicit: ownTitle !== '', startedAt, turns, stats }
 }

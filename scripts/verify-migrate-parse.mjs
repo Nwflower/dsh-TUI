@@ -565,4 +565,16 @@ const gkParse = (rows, summary = gkSummary()) => parseGrokSession({ summaryJson:
     shape.join(' | ') === '长任务:1 | ∅[This session@grok-x]:1 | 下一个:1' && session.stats.filtered === 1, shape.join(' | '))
 }
 
+{
+  const rows = [gkUser('<user_query>\n  兜底\n提问 </user_query>'), gkAsst('a')]
+  const titleOf = extra => {
+    const session = gkParse(rows, gkSummary(extra))
+    return `${session.title}|${session.titleExplicit}`
+  }
+  check('8k. generated_title 压过 session_summary，均为显式标题',
+    titleOf({ generated_title: '生成标题' }) === '生成标题|true' && titleOf({}) === 'Grok 摘要标题|true')
+  check('8l. 两者皆无时兜底首个真实提问（已剥包装、归一空白），不算显式',
+    titleOf({ session_summary: '  ' }) === '兜底 提问|false', titleOf({ session_summary: '  ' }))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
