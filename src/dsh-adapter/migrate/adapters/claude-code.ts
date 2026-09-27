@@ -1,20 +1,63 @@
 /**
  * Claude Code adapter: `~/.claude/projects/<munged-cwd>/<session>.jsonl`.
  * File discovery lives here; the line format is parsed by the pure
- * claude-code.parse.ts.
+ * claude-code.parse.ts. The browse scan derives each summary from the same
+ * parser run over the file's head, plus a tail window for the /rename title
+ * (renames append, the last one wins).
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/claude-code
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
-import type { MigrationAdapter, MigrationDiscovery, MigrationSession } from '../types.js'
+import { basename, dirname, join } from 'node:path'
+import { parseJsonl } from '../parse/jsonl.js'
+import { normalizeTitle } from '../parse/title.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
 import { parseClaudeTranscript } from './claude-code.parse.js'
 import { countEntries } from './scan.js'
+import { fingerprintOf, loadText, readTail, runScan, walkFiles, withHead, type ScanCandidate } from './scan-fs.js'
 
 /** Sub-agent transcripts (`<session>/subagents/*.jsonl`) belong to their
  *  parent session; they are never conversations of their own. */
 const SUBAGENT_DIR = 'subagents'
+
+/** Tail window searched for the latest /rename title. */
+const TITLE_TAIL_BYTES = 64 * 1024
+
+/** File name without `.jsonl`: the session's stable source id. */
+const fileStemOf = (path: string): string => basename(path).replace(/\.jsonl$/u, '')
+
+/** cwd guessed from the project directory name, for logs whose lines record none. */
+const fallbackCwdOf = (path: string): string => unmunge(basename(dirname(path))) ?? homedir()
+
+/** The last /rename title in a tail window, when there is one. */
+function tailRenameTitle(tail: string): string | undefined {
+  let title: string | undefined
+  for (const record of parseJsonl(tail).records) {
+    if (record.type === 'custom-title' && typeof record.customTitle === 'string' && record.customTitle.trim() !== '') title = record.customTitle
+  }
+  return title
+}
+
+async function summarize({ ref, fp }: ScanCandidate): Promise<ForeignSessionSummary | null> {
+  const input = { fileStem: fileStemOf(ref), fallbackCwd: fallbackCwdOf(ref) }
+  const found = await withHead(ref, fp.size, (raw, whole) => {
+    const session = parseClaudeTranscript({ ...input, raw })
+    return session === undefined ? undefined : { session, whole }
+  })
+  if (found === undefined) return null
+  const { session, whole } = found
+  const renamed = whole ? undefined : tailRenameTitle(await readTail(ref, TITLE_TAIL_BYTES, fp.size))
+  return {
+    agentId: 'claude-code',
+    sessionKey: session.sourceId,
+    ref,
+    title: renamed === undefined ? session.title ?? '' : normalizeTitle(renamed),
+    cwd: session.cwd,
+    lastMessageAt: fp.mtimeMs,
+    createdAt: session.startedAt || fp.mtimeMs,
+  }
+}
 
 function readOne(path: string, fallbackCwd: string): MigrationSession | undefined {
   let raw: string
@@ -26,7 +69,7 @@ function readOne(path: string, fallbackCwd: string): MigrationSession | undefine
   // basename(), not split('/'): join() produces `\` separators on Windows, so
   // splitting on '/' would leave the WHOLE absolute path as the id — and the
   // id is the dedupe key (moving the source store would re-import everything).
-  return parseClaudeTranscript({ raw, fileStem: basename(path).replace(/\.jsonl$/u, ''), fallbackCwd })
+  return parseClaudeTranscript({ raw, fileStem: fileStemOf(path), fallbackCwd })
 }
 
 export const claudeCodeAdapter: MigrationAdapter = {
@@ -64,6 +107,22 @@ export const claudeCodeAdapter: MigrationAdapter = {
   },
   count(): number {
     return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR] })
+  },
+  async scan(options?: ScanOptions) {
+    const roots = this.roots()
+    const candidates = async function* (): AsyncGenerator<ScanCandidate> {
+      const files = walkFiles(roots, { maxDepth: 3, match: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR], signal: options?.signal })
+      for await (const file of files) {
+        const fp = await fingerprintOf(file.path)
+        if (fp !== undefined) yield { ref: file.path, fp }
+      }
+    }
+    return runScan(candidates(), options, summarize)
+  },
+  async load(ref: string): Promise<MigrationSession | LoadSkip> {
+    const raw = await loadText(ref)
+    if (typeof raw !== 'string') return raw
+    return parseClaudeTranscript({ raw, fileStem: fileStemOf(ref), fallbackCwd: fallbackCwdOf(ref) }) ?? { skip: 'not-a-session' }
   },
 }
 
