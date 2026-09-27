@@ -269,6 +269,65 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   }
 }
 
+// ── 4c'. 工具调用与步内输入：事件顺序 + 落盘读回后的 wire 合法性 ─────────
+{
+  const { newStep } = await import('../src/dsh-adapter/migrate/parse/tools.js')
+  const step1 = newStep('model-a')
+  step1.blocks.push({ type: 'reasoning', text: '先看两个文件' }, { type: 'text', text: '我读一下' },
+    { type: 'tool-call', id: 'call_a', name: 'read', arguments: '{"path":"a.ts"}' },
+    { type: 'tool-call', id: 'call_b', name: 'read', arguments: '{"path":"b.ts"}' })
+  step1.results.push({ callId: 'call_a', text: 'A 内容', isError: false }, { callId: 'call_b', text: '', isError: true })
+  const step2 = newStep('model-a')
+  step2.inputs.push('[Image: 截图说明]')
+  step2.blocks.push({ type: 'text', text: '看完了' })
+  const toolSession = {
+    sourceId: '55555555-5555-4555-8555-555555555555', cwd: '/tmp/tools', startedAt: 1790000400000,
+    titleExplicit: false, stats: emptyStats(),
+    turns: [{ prompt: '读 a 和 b', steps: [step1, step2] }],
+  }
+  const id = migrationSessionId(fakeAdapter, toolSession)
+  const { events } = sessionize(id, 'fixture', toolSession)
+  const types = events.map(e => e.type).join(' ')
+  check("4c'1. 步内顺序：assistant → tool/call×n → tool/result×n；步内输入在 assistant 之前",
+    types === 'turn/start step/start system/message user/message assistant/message tool/call tool/call tool/result tool/result step/end'
+      + ' step/start user/message assistant/message step/end turn/end', types)
+  const calls = events.filter(e => e.type === 'tool/call')
+  const results = events.filter(e => e.type === 'tool/result')
+  check("4c'2. tool/result 引用各自 tool/call 的 seq，错误标记保留",
+    results.length === 2 && results[0].sourceEventSeqs?.[0] === calls[0].seq && results[1].sourceEventSeqs?.[0] === calls[1].seq
+    && results[1].data.message.isError === true && results[1].data.message.content.length === 0)
+  const assistant = events.find(e => e.type === 'assistant/message')
+  check("4c'3. assistant 内容携带 tool-call 块（wire 的 tool_calls 由它派生）",
+    assistant.data.message.content.filter(b => b.type === 'tool-call').map(b => b.id).join(',') === 'call_a,call_b')
+
+  const rootTools = mkdtempSync(join(tmpdir(), 'verify-migrate-tools-'))
+  const run = await importSessions(fakeAdapter, rootTools, [toolSession])
+  const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  const { Context } = await import('@deepseek-ai/cordis')
+  const ctxT = new Context()
+  const fiberT = ctxT.plugin(JsonlSessionPersistence, { root: rootTools })
+  for (let i = 0; i < 100 && ctxT.get('sessionPersistence') === undefined; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  const h = await ctxT.get('sessionPersistence').open(id, 'read')
+  const r = await h.read()
+  await h.close()
+  const msgs = Session.fromRestore(id, r.events, h.header, SessionLogOffset(0), r.eventState).deriveMessages()
+  // wire 规则：带 tool_calls 的 assistant 之后，紧跟的消息恰好是覆盖全部 call id 的 tool 消息
+  let legal = true
+  for (let i = 0; i < msgs.length; i++) {
+    const ids = msgs[i].role === 'assistant' ? msgs[i].content.filter(b => b.type === 'tool-call').map(b => b.id) : []
+    if (ids.length === 0) continue
+    const answered = msgs.slice(i + 1, i + 1 + ids.length)
+    if (answered.length !== ids.length || answered.some((m, k) => m.role !== 'tool' || m.toolCallId !== ids[k])) legal = false
+  }
+  check("4c'4. 落盘读回后 wire 合法（每个 tool_call 紧跟其 tool 消息）",
+    run.imported === 1 && legal && msgs.map(m => m.role).join(',') === 'user,assistant,tool,tool,user,assistant',
+    msgs.map(m => m.role).join(','))
+  await Promise.resolve(fiberT.dispose()).catch(() => {})
+  rmSync(rootTools, { recursive: true, force: true })
+}
+
 // ── 4d. 单会话失败不中断批次（deep-review M6：容错路径必须被触发）────────
 {
   const good1 = fixtureSessions()[0]

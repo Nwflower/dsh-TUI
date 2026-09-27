@@ -16,24 +16,37 @@
  * user message; a turn with no step is a legal step-less turn whose prompt
  * sits directly inside the turn.
  *
+ * Inside a step, events follow the live loop too: the step's user inputs
+ * (mid-turn context), the assistant message whose content carries the
+ * tool-call blocks, one `tool/call` per call, then one `tool/result` per
+ * call citing its call event. Parsing already closed every call
+ * (closeToolPairs), so no step leaves a call unanswered — the invariant the
+ * wire needs on resume: every tool call is followed by its tool message
+ * before any later assistant message.
+ *
  * System head: the live loop reserves surface node 0 for the system prompt
  * (an empty `system/message` in the first step, before any user message).
  * An imported log gets the same empty head: it projects to no message, so
  * re-reading is unchanged, and when the session is resumed the loop REPLACES
  * it with the rendered prompt. Without it the loop appends its prompt after
  * the imported history, where adapters that only lift a LEADING system
- * message (pi-ai) send it as one more user message. Tool
- * traffic is not migrated: source formats cannot replay it faithfully, and
- * the migration contract is "re-read the conversation", not "resume the task".
+ * message (pi-ai) send it as one more user message.
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/sessionize
  */
-import { createAssistantMessage, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ReasoningBlock, TextBlock } from '@deepseek-ai/dsh-llm'
+import {
+  ToolCallId,
+  createAssistantMessage,
+  createSystemMessage,
+  createToolResultMessage,
+  createUserMessage,
+} from '@deepseek-ai/dsh-llm'
+import type { ReasoningBlock, TextBlock, ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import {
   SESSION_FORMAT_VERSION,
   Session,
   SessionId,
+  type SessionSeq,
   type SessionEvent,
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
@@ -46,13 +59,14 @@ export interface SessionizedLog {
 }
 
 /** Blocks for one migrated step, in source order (reasoning before the text
- *  it explains). A step with no content keeps one empty text block so the
- *  assistant message stays well-formed. */
-function assistantBlocks(step: ImportStep): (TextBlock | ReasoningBlock)[] {
-  const blocks: (TextBlock | ReasoningBlock)[] = []
-  for (const block of step.blocks) {
-    if (block.type === 'text' || block.type === 'reasoning') blocks.push({ type: block.type, text: block.text })
-  }
+ *  it explains, tool calls where the model made them). A step with no
+ *  content keeps one empty text block so the assistant message stays
+ *  well-formed. */
+function assistantBlocks(step: ImportStep): (TextBlock | ReasoningBlock | ToolCallBlock)[] {
+  const blocks: (TextBlock | ReasoningBlock | ToolCallBlock)[] = step.blocks.map(block =>
+    block.type === 'tool-call'
+      ? { type: 'tool-call', id: ToolCallId(block.id), name: block.name, arguments: block.arguments }
+      : { type: block.type, text: block.text })
   if (blocks.length === 0) blocks.push({ type: 'text', text: '' })
   return blocks
 }
@@ -92,6 +106,28 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
       source: { kind: 'user' },
     }), { surfaceOp: 'append' }))
   }
+  const writeTools = (turn: number, step: number, imported: ImportStep): void => {
+    const callSeqs = new Map<string, SessionSeq>()
+    for (const block of imported.blocks) {
+      if (block.type !== 'tool-call') continue
+      const call = model.append('tool/call', { turn, step, callId: ToolCallId(block.id), name: block.name, arguments: block.arguments })
+      events.push(call)
+      callSeqs.set(block.id, call.seq)
+    }
+    for (const result of imported.results) {
+      const callSeq = callSeqs.get(result.callId)
+      if (callSeq === undefined) continue
+      events.push(model.append('tool/result', {
+        turn,
+        step,
+        message: createToolResultMessage({
+          callId: ToolCallId(result.callId),
+          content: result.text === '' ? [] : [{ type: 'text', text: result.text }],
+          isError: result.isError,
+        }),
+      }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] }))
+    }
+  }
   let turnIndex = 0
   for (const turn of session.turns) {
     turnIndex += 1
@@ -114,6 +150,7 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
       events.push(model.append('step/start', { turn: turnIndex, step }))
       if (!headWritten) writeHead(turnIndex, step)
       if (step === 1) writePrompt(turn.prompt)
+      for (const input of imported.inputs) writePrompt(input)
       events.push(model.append('assistant/message', {
         turn: turnIndex,
         step,
@@ -128,6 +165,7 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
         }),
         stream: [],
       }, { surfaceOp: 'append' }))
+      writeTools(turnIndex, step, imported)
       events.push(model.append('step/end', { turn: turnIndex, step }))
     }
     events.push(model.append('turn/end', { turn: turnIndex, reason: { kind: 'completed' } }))
