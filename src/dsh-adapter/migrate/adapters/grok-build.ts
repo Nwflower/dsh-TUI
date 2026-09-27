@@ -11,13 +11,15 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { Fingerprint, ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
+import type { Fingerprint, ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions, WalkSpec } from '../types.js'
 import { parseGrokSession } from './grok-build.parse.js'
 import { countEntries } from './scan.js'
 import { fingerprintOf, loadText, runScan, walkFiles, withHead, type ScanCandidate } from './scan-fs.js'
 
 const HISTORY_FILE = 'chat_history.jsonl'
 const SUMMARY_FILE = 'summary.json'
+
+const WALK: WalkSpec = { maxDepth: 2, match: name => name === HISTORY_FILE }
 
 /** One change token for both files of a session directory. */
 async function directoryFingerprint(dir: string): Promise<Fingerprint | undefined> {
@@ -92,12 +94,13 @@ export const grokBuildAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 2, fileMatch: name => name === HISTORY_FILE })
+    return countEntries(this.roots(), { maxDepth: WALK.maxDepth, fileMatch: WALK.match })
   },
+  walk: WALK,
   async scan(options?: ScanOptions) {
     const roots = this.roots()
     const candidates = async function* (): AsyncGenerator<ScanCandidate> {
-      for await (const file of walkFiles(roots, { maxDepth: 2, match: name => name === HISTORY_FILE, signal: options?.signal })) {
+      for await (const file of walkFiles(roots, { ...WALK, signal: options?.signal })) {
         const fp = await directoryFingerprint(file.dir)
         if (fp !== undefined) yield { ref: file.dir, fp }
       }

@@ -203,6 +203,85 @@ const keyed = entries => entries.filter(e => e.summary !== null).map(e => e.summ
     && JSON.stringify(await zcodeAdapter.load(zcSummaries[0].ref)) === JSON.stringify(zcodeAdapter.discover().sessions[0]))
 }
 
+// ── 4. catalog：来源探测、缓存复用、快照、generation 保护 ───────────────
+{
+  const { utimesSync, writeFileSync: write, readFileSync } = await import('node:fs')
+  const { ForeignCatalog } = await import('../src/dsh-adapter/migrate/catalog.js')
+  const { claudeCodeAdapter } = await import('../src/dsh-adapter/migrate/adapters/claude-code.js')
+  const { codexAdapter } = await import('../src/dsh-adapter/migrate/adapters/codex.js')
+  const { grokBuildAdapter } = await import('../src/dsh-adapter/migrate/adapters/grok-build.js')
+  const { zcodeAdapter } = await import('../src/dsh-adapter/migrate/adapters/zcode.js')
+  const { ompAdapter } = await import('../src/dsh-adapter/migrate/adapters/omp.js')
+  const adapters = [claudeCodeAdapter, codexAdapter, ompAdapter, zcodeAdapter, grokBuildAdapter]
+
+  // 让最近活动的顺序确定：codex 最新，zcode 最旧
+  const at = seconds => new Date(1790000000000 + seconds * 1000)
+  const touch = (path, s) => utimesSync(path, at(s), at(s))
+  touch(join(home, '.codex', 'sessions', '2026', '09', '01', 'rollout-2026-09-01T00-00-00-0199aaaa-0000-7000-8000-000000000001.jsonl'), 400)
+  touch(join(home, '.zcode', 'v2', 'sessions', 'w', 'task-9.json'), 100)
+  touch(join(home, '.zcode', 'v2', 'sessions', 'w', 'broken.json'), 100)
+  for (const name of ['aaaa.jsonl', 'bbbb.jsonl', 'agent-aux.jsonl', 'cccc.jsonl']) touch(join(home, '.claude', 'projects', '-w-cc', name), 300)
+  touch(join(home, '.codex', 'sessions', '2026', '09', '01', 'rollout-2026-09-01T00-00-01-0199aaaa-0000-7000-8000-000000000002.jsonl'), 50)
+  for (const id of ['grok-1', 'grok-2']) {
+    for (const name of ['summary.json', 'chat_history.jsonl']) touch(join(home, '.grok', 'sessions', '%2Fw%2Fgrok', id, name), 200)
+  }
+
+  const file = join(scratch, 'catalog', 'foreign-catalog.v1.json')
+  const catalog = new ForeignCatalog(adapters, file)
+  check('4a. 没有快照时来源为空（不阻塞首帧）', catalog.sources().length === 0 && catalog.sessions('claude-code').length === 0)
+  const sources = await catalog.refreshSources()
+  check('4b. 探测：只列可浏览且有数据的来源（omp 不在），按最近活动降序，计数为候选文件数',
+    sources.map(s => `${s.agentId}:${s.count}`).join(',') === 'codex:2,claude-code:4,grok-build:2,zcode:2',
+    sources.map(s => `${s.agentId}:${s.count}`).join(','))
+  const claude = await catalog.refreshSessions('claude-code')
+  check('4c. 会话按最近消息降序；否定结果不出现在列表', claude.map(s => s.sessionKey).join(',').split(',').sort().join(',') === 'aaaa,bbbb' && claude.length === 2)
+
+  const reopened = new ForeignCatalog(adapters, file)
+  check('4d. 快照持久化：新实例不扫描即可读出来源与会话',
+    reopened.sources().map(s => s.agentId).join(',') === 'codex,claude-code,grok-build,zcode'
+    && reopened.sessions('claude-code').map(s => s.sessionKey).sort().join(',') === 'aaaa,bbbb')
+
+  // 指纹未变时整轮复用：把快照里的 aaaa 标题改掉，重扫后仍是改过的值（说明没有重读文件）
+  const snapshot = JSON.parse(readFileSync(file, 'utf8'))
+  const aaaaRef = Object.keys(snapshot.agents['claude-code']).find(ref => ref.endsWith('aaaa.jsonl'))
+  snapshot.agents['claude-code'][aaaaRef].summary.title = '来自快照'
+  write(file, JSON.stringify(snapshot))
+  const warm = new ForeignCatalog(adapters, file)
+  const warmList = await warm.refreshSessions('claude-code')
+  check('4e. 热重扫：指纹未变的条目直接复用快照摘要', warmList.find(s => s.sessionKey === 'aaaa')?.title === '来自快照')
+  touch(join(home, '.claude', 'projects', '-w-cc', 'aaaa.jsonl'), 500)
+  const changed = await warm.refreshSessions('claude-code')
+  check('4f. 指纹变化的条目重新读取，排序随之更新', changed[0].sessionKey === 'aaaa' && changed[0].title === '小会话标题')
+
+  write(file, '{"version":1,"sources":')
+  check('4g. 损坏的快照读作空', new ForeignCatalog(adapters, file).sources().length === 0)
+
+  // generation 保护：先发起的慢扫描晚于后发起的快扫描完成时，不覆盖新结果
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let calls = 0
+  const summary = key => ({ agentId: 'fake', sessionKey: key, ref: key, title: key, cwd: '', lastMessageAt: 0, createdAt: 0 })
+  const fake = {
+    id: 'fake', label: 'Fake', roots: () => [], discover: () => ({ roots: [], sessions: [] }),
+    walk: { maxDepth: 0, match: () => false },
+    load: async () => ({ skip: 'missing' }),
+    scan: async () => {
+      calls += 1
+      if (calls === 1) {
+        await gate
+        return [{ ref: 'old', fp: { mtimeMs: 1, size: 1 }, summary: summary('old') }]
+      }
+      return [{ ref: 'new', fp: { mtimeMs: 2, size: 2 }, summary: summary('new') }]
+    },
+  }
+  const raced = new ForeignCatalog([fake], join(scratch, 'catalog', 'race.json'))
+  const slow = raced.refreshSessions('fake')
+  const fast = await raced.refreshSessions('fake')
+  release()
+  const late = await slow
+  check('4h. 晚到的旧扫描不覆盖新结果', fast[0]?.sessionKey === 'new' && late[0]?.sessionKey === 'new' && raced.sessions('fake')[0]?.sessionKey === 'new')
+}
+
 for (const [key, value] of Object.entries(savedEnv)) {
   if (value === undefined) delete process.env[key]
   else process.env[key] = value

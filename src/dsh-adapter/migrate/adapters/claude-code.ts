@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { parseJsonl } from '../parse/jsonl.js'
 import { normalizeTitle } from '../parse/title.js'
-import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions, WalkSpec } from '../types.js'
 import { parseClaudeTranscript } from './claude-code.parse.js'
 import { countEntries } from './scan.js'
 import { fingerprintOf, loadText, readTail, runScan, walkFiles, withHead, type ScanCandidate } from './scan-fs.js'
@@ -20,6 +20,8 @@ import { fingerprintOf, loadText, readTail, runScan, walkFiles, withHead, type S
 /** Sub-agent transcripts (`<session>/subagents/*.jsonl`) belong to their
  *  parent session; they are never conversations of their own. */
 const SUBAGENT_DIR = 'subagents'
+
+const WALK: WalkSpec = { maxDepth: 3, match: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR] }
 
 /** Tail window searched for the latest /rename title. */
 const TITLE_TAIL_BYTES = 64 * 1024
@@ -106,12 +108,13 @@ export const claudeCodeAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR] })
+    return countEntries(this.roots(), { maxDepth: WALK.maxDepth, fileMatch: WALK.match, skipDirs: WALK.skipDirs })
   },
+  walk: WALK,
   async scan(options?: ScanOptions) {
     const roots = this.roots()
     const candidates = async function* (): AsyncGenerator<ScanCandidate> {
-      const files = walkFiles(roots, { maxDepth: 3, match: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR], signal: options?.signal })
+      const files = walkFiles(roots, { ...WALK, signal: options?.signal })
       for await (const file of files) {
         const fp = await fingerprintOf(file.path)
         if (fp !== undefined) yield { ref: file.path, fp }

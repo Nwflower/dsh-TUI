@@ -10,10 +10,12 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions, WalkSpec } from '../types.js'
 import { countEntries } from './scan.js'
 import { fingerprintOf, loadText, runScan, walkFiles, type ScanCandidate } from './scan-fs.js'
 import { parseZcodeSession } from './zcode.parse.js'
+
+const WALK: WalkSpec = { maxDepth: 3, match: name => name.endsWith('.json') }
 
 async function summarize({ ref, fp }: ScanCandidate): Promise<ForeignSessionSummary | null> {
   const raw = await loadText(ref)
@@ -71,12 +73,13 @@ export const zcodeAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.json') })
+    return countEntries(this.roots(), { maxDepth: WALK.maxDepth, fileMatch: WALK.match })
   },
+  walk: WALK,
   async scan(options?: ScanOptions) {
     const roots = this.roots()
     const candidates = async function* (): AsyncGenerator<ScanCandidate> {
-      for await (const file of walkFiles(roots, { maxDepth: 3, match: name => name.endsWith('.json'), signal: options?.signal })) {
+      for await (const file of walkFiles(roots, { ...WALK, signal: options?.signal })) {
         const fp = await fingerprintOf(file.path)
         if (fp !== undefined) yield { ref: file.path, fp }
       }

@@ -147,6 +147,14 @@ export interface ScanOptions {
   onEntry?(summary: ForeignSessionSummary): void
 }
 
+/** Where a source's artifacts sit under its roots, by name alone. */
+export interface WalkSpec {
+  readonly maxDepth: number
+  readonly match: (name: string) => boolean
+  /** Directory names never descended into. */
+  readonly skipDirs?: readonly string[]
+}
+
 /** Why a full load produced no session. */
 export interface LoadSkip {
   readonly skip: 'missing' | 'too-large' | 'not-a-session'
@@ -164,6 +172,9 @@ export interface MigrationAdapter {
    *  that cannot count by name alone may omit this and fall back to
    *  discover() — the count then equals the parsed session total. */
   count?(): number
+  /** The name-only walk scan() follows; lets a caller count candidates and
+   *  find the newest activity without parsing. Present with scan(). */
+  readonly walk?: WalkSpec
   /** Asynchronous, abortable summary scan for browsing (head/tail reads,
    *  fingerprint reuse). Sources without it are not browsable. */
   scan?(options?: ScanOptions): Promise<readonly ScanEntry[]>

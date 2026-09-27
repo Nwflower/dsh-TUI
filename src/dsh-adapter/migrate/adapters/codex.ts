@@ -10,12 +10,14 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions, WalkSpec } from '../types.js'
 import { parseCodexRollout } from './codex.parse.js'
 import { countEntries } from './scan.js'
 import { fingerprintOf, loadText, runScan, walkFiles, withHead, type ScanCandidate } from './scan-fs.js'
 
 const isRollout = (name: string): boolean => name.startsWith('rollout-') && name.endsWith('.jsonl')
+
+const WALK: WalkSpec = { maxDepth: 5, match: isRollout }
 
 /** The rollout's stable source id: the uuid in its file name. */
 function sourceIdOf(path: string): string {
@@ -82,12 +84,13 @@ export const codexAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 5, fileMatch: isRollout })
+    return countEntries(this.roots(), { maxDepth: WALK.maxDepth, fileMatch: WALK.match })
   },
+  walk: WALK,
   async scan(options?: ScanOptions) {
     const roots = this.roots()
     const candidates = async function* (): AsyncGenerator<ScanCandidate> {
-      for await (const file of walkFiles(roots, { maxDepth: 5, match: isRollout, signal: options?.signal })) {
+      for await (const file of walkFiles(roots, { ...WALK, signal: options?.signal })) {
         const fp = await fingerprintOf(file.path)
         if (fp !== undefined) yield { ref: file.path, fp }
       }
