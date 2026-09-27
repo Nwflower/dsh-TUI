@@ -264,4 +264,24 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
     session.stats.filtered === 3 && session.stats.meta === 3, JSON.stringify(session.stats))
 }
 
+{
+  // ghost retry：一次响应的调用没等到结果，下一次响应原样重发同一 call id
+  const call = { type: 'tool_use', id: 'tu_same', name: 'Bash', input: { command: 'make' } }
+  const session = ccParse([
+    ccUser('构建一下'),
+    ccAsst('msg_ghost', [call]),
+    ccAsst('msg_retry', [{ type: 'text', text: '重试' }]),
+    ccAsst('msg_retry', [call]),
+    ccUser([{ type: 'tool_result', tool_use_id: 'tu_same', content: 'ok' }]),
+    // 参数不同的重复 id 不是 ghost：保留两步，由 closeToolPairs 改名去重
+    ccAsst('msg_x', [{ type: 'tool_use', id: 'tu_diff', name: 'Bash', input: { command: 'a' } }]),
+    ccAsst('msg_y', [{ type: 'tool_use', id: 'tu_diff', name: 'Bash', input: { command: 'b' } }]),
+  ])
+  const steps = session.turns[0].steps
+  check('6l. 原样重发的前一步被删除，结果留在重发步',
+    steps[0].blocks.map(b => b.type).join(',') === 'text,tool-call' && steps[0].results[0]?.text === 'ok')
+  check('6m. 参数不同的同 id 调用不当作 ghost，改名后两步都保留',
+    steps.length === 3 && steps[1].blocks[0].id === 'tu_diff' && steps[2].blocks[0].id === 'tu_diff#2')
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)

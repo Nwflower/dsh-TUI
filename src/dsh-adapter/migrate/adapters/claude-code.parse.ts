@@ -88,6 +88,35 @@ function commandPrompt(text: string): string {
   return `${name} ${args}`.trim() || text
 }
 
+/**
+ * Drop failed-dispatch ghosts: when a response's tool calls got no result,
+ * Claude Code re-sends the SAME calls (same ids, same arguments) in the next
+ * response. Kept, the id would appear twice in the log. A step is a ghost
+ * when it holds only tool calls, none answered, and the very next step
+ * re-sends every one of them verbatim; its inputs move to the retry.
+ * @returns How many steps were dropped.
+ */
+function dropGhostRetries(steps: ImportStep[]): number {
+  let dropped = 0
+  for (let i = 0; i < steps.length - 1;) {
+    const ghost = steps[i]!
+    const retry = steps[i + 1]!
+    const isGhost = ghost.blocks.length > 0 && ghost.results.length === 0
+      && ghost.blocks.every(block => block.type === 'tool-call'
+        && retry.blocks.some(again => again.type === 'tool-call' && again.id === block.id
+          && again.name === block.name && again.arguments === block.arguments))
+    if (!isGhost) {
+      i += 1
+      continue
+    }
+    retry.inputs = [...ghost.inputs, ...retry.inputs]
+    steps.splice(i, 1)
+    dropped += 1
+    // Stay at i: the retry may itself be a ghost of the step after it.
+  }
+  return dropped
+}
+
 /** Whether a user line is a tool-result carrier rather than a prompt. */
 function isToolResultLine(content: unknown): boolean {
   return Array.isArray(content) && content.some(block => isRecord(block) && block.type === 'tool_result')
@@ -222,6 +251,7 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     }
     return turn.prompt !== '' || turn.steps.length > 0
   })
+  for (const turn of turns) dropGhostRetries(turn.steps)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (!turns.some(turn => turn.prompt !== '')) return undefined
 
