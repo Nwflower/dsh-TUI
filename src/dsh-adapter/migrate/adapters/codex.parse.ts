@@ -16,7 +16,8 @@
  * Tool traffic: `function_call` / `custom_tool_call` items are tool calls of
  * the step in progress; their `*_output` items pair back by `call_id`. A
  * step is one model call: an output ends it, and the next model-produced
- * item opens the next one.
+ * item opens the next one. `agent_message` items (a sub-agent's report to
+ * this thread) are inputs of the next model call.
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/codex.parse
  */
@@ -117,11 +118,18 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
   let sawOutput = false
   let unnamedCalls = 0
   let sawMeta = false
+  /** Messages from sub-agents waiting for the next model call. */
+  let pendingInputs: string[] = []
   let subagent = false
   /** A compaction summary waiting for the turn that follows the boundary. */
   let pendingCompaction: ImportCompaction | undefined
 
   const openTurn = (prompt: string): void => {
+    // Sub-agent messages no model call consumed before a new prompt are stale.
+    if (prompt !== '') {
+      stats.filtered += pendingInputs.length
+      pendingInputs = []
+    }
     current = pendingCompaction === undefined ? { prompt, steps: [] } : { prompt, compaction: pendingCompaction, steps: [] }
     pendingCompaction = undefined
     turns.push(current)
@@ -138,6 +146,8 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
     if (current === undefined) openTurn('')
     if (step === undefined || sawOutput) {
       step = newStep(model)
+      step.inputs = pendingInputs
+      pendingInputs = []
       current!.steps.push(step)
       sawOutput = false
     }
@@ -156,6 +166,16 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
           const text = blocksText(payload.content, 'output_text')
           if (text !== '') modelStep().blocks.push({ type: 'text', text })
         }
+        return
+      }
+      case 'agent_message': {
+        // A sub-agent's report delivered to this thread: model-visible input
+        // of the next model call, not a turn of its own.
+        const text = blocksText(payload.content, 'input_text')
+        if (text === '') return
+        pendingInputs.push(text)
+        stats.meta += 1
+        sawOutput = true
         return
       }
       case 'reasoning': {
@@ -236,6 +256,7 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
     acceptItem(payload)
   }
 
+  stats.filtered += pendingInputs.length
   if (pendingCompaction !== undefined) turns.push({ prompt: '', compaction: pendingCompaction, steps: [] })
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0 || turn.compaction !== undefined)
   stats.droppedToolResults = calls.orphans + closeToolPairs(turns)

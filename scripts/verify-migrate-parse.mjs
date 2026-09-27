@@ -460,4 +460,26 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
     fork !== undefined && fork.cwd === '/w/fork')
 }
 
+{
+  const report = text => cxItem({ type: 'agent_message', author: '/root/audit', recipient: '/root', content: [{ type: 'input_text', text }] })
+  const session = cxParse([
+    cxMeta(),
+    cxUser('派两个子代理审查'),
+    cxItem({ type: 'function_call', call_id: 'spawn', name: 'spawn_agent', arguments: '{}' }),
+    cxItem({ type: 'function_call_output', call_id: 'spawn', output: 'spawned' }),
+    cxAsst('等待子代理'),
+    report('子代理 A：发现 2 个问题'),
+    report('子代理 B：没有问题'),
+    cxAsst('汇总：共 2 个问题'),
+    report('迟到的报告'),
+    cxUser('下一个问题'),
+  ])
+  const steps = session.turns[0].steps
+  check('7q. agent_message 成为下一次模型调用的输入，并开启新步',
+    steps.length === 3 && JSON.stringify(steps[2].inputs) === JSON.stringify(['子代理 A：发现 2 个问题', '子代理 B：没有问题'])
+    && steps[2].blocks[0].text === '汇总：共 2 个问题')
+  check('7r. 没被任何调用消费就遇到新提问的报告计入 filtered',
+    session.stats.meta === 3 && session.stats.filtered === 1, JSON.stringify(session.stats))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
