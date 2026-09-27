@@ -24,11 +24,17 @@
  * the native compaction transaction). The legacy 2.0.x `summary` record is
  * a one-line leaf title written at the head of a file, not a boundary.
  *
+ * Title authority: `custom-title` (the user's /rename; the LAST one wins —
+ * renames append) > legacy `summary` > `ai-title` (the FIRST one; later
+ * ones are rewritten per turn and drift) > the first real prompt as a
+ * fallback that is not written to the log.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/claude-code.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
-import { isInjectedText, stripSystemReminders } from '../parse/injection.js'
+import { isInjectedText, stripSystemReminders, unwrapUserText } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
+import { normalizeTitle } from '../parse/title.js'
 import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
 import type { ImportCompaction, ImportStep, ImportTurn, MigrationSession } from '../types.js'
 
@@ -144,6 +150,9 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
   /** A compaction summary waiting for the turn that follows the boundary. */
   let pendingCompaction: ImportCompaction | undefined
   let lastModel: string | undefined
+  let renamedTitle: string | undefined
+  let legacyTitle: string | undefined
+  let aiTitle: string | undefined
   /** isMeta texts waiting for the next step of the current turn. */
   let pendingInputs: string[] = []
   /** Turns opened by a slash-command echo rather than typed words. */
@@ -233,6 +242,9 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
 
   for (const record of records) {
     const type = record.type
+    if (type === 'custom-title' && typeof record.customTitle === 'string' && record.customTitle.trim() !== '') renamedTitle = record.customTitle
+    else if (type === 'summary' && typeof record.summary === 'string' && record.summary.trim() !== '') legacyTitle = record.summary
+    else if (type === 'ai-title' && typeof record.aiTitle === 'string' && record.aiTitle.trim() !== '') aiTitle ??= record.aiTitle
     if (type !== 'user' && type !== 'assistant') continue
     if (record.isSidechain === true) continue
     const message = record.message
@@ -286,5 +298,16 @@ export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSe
     const match = noted === undefined ? null : /Primary working directory: (\S+)/u.exec(noted.prompt)
     if (match !== null) cwd = match[1]!
   }
-  return { sourceId: input.fileStem, cwd, titleExplicit: false, startedAt, turns, stats }
+  const explicit = normalizeTitle(renamedTitle ?? legacyTitle ?? aiTitle)
+  const firstPrompt = turns.find(turn => turn.prompt !== '' && !commandTurns.has(turn))?.prompt
+  const title = explicit !== '' ? explicit : normalizeTitle(firstPrompt === undefined ? undefined : unwrapUserText(firstPrompt))
+  return {
+    sourceId: input.fileStem,
+    cwd,
+    ...(title === '' ? {} : { title }),
+    titleExplicit: explicit !== '',
+    startedAt,
+    turns,
+    stats,
+  }
 }

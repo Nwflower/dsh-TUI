@@ -304,4 +304,21 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
     session.turns[1].steps[0].inputs[0] === 'Continue from where you left off.')
 }
 
+{
+  const body = [ccUser('<command-name>/review</command-name>'), ccAsst('m0', [{ type: 'text', text: 'x' }]),
+    ccUser('  第一个真实\n提问  '), ccAsst('m1', [{ type: 'text', text: 'y' }])]
+  const titleOf = extra => {
+    const session = ccParse([...extra, ...body])
+    return `${session.title}|${session.titleExplicit}`
+  }
+  const ai = n => JSON.stringify({ type: 'ai-title', aiTitle: `AI 标题 ${n}`, sessionId: SID })
+  const custom = n => JSON.stringify({ type: 'custom-title', customTitle: `改名 ${n}`, sessionId: SID })
+  const legacy = JSON.stringify({ type: 'summary', summary: '旧格式标题', leafUuid: 'l1' })
+  check('6p. custom-title 后到者胜，压过 summary 与 ai-title', titleOf([ai(1), custom(1), legacy, custom(2)]) === '改名 2|true')
+  check('6q. 旧格式 summary 压过 ai-title', titleOf([ai(1), legacy]) === '旧格式标题|true')
+  check('6r. ai-title 取首个（后续逐轮改写会漂移）', titleOf([ai(1), ai(2)]) === 'AI 标题 1|true')
+  check('6s. 无显式标题时兜底首个真实提问（跳过命令回显，归一空白），不算显式',
+    titleOf([]) === '第一个真实 提问|false', titleOf([]))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
