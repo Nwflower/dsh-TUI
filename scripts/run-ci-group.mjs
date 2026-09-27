@@ -299,6 +299,9 @@ const GROUPS = {
 // uuid v5 幂等、五 adapter fixture 解析（含 sourceId 只取裸文件名）、
 // /migrate 命令分类矩阵。
     ["verify-migrate", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate.mjs']],
+// 迁移源解析层回归（纯函数、合成 fixture）：jsonl 坏行计数、注入识别与
+// 包装剥离、标题归一、工具调用配对，以及各源逐条解析规则。
+    ["verify-migrate-parse", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate-parse.mjs']],
 // /migrate 交互回归（挂真实 Chat）：fresh 会话直接 `/migrate <agent>` 必须
 // 打开确认层（旧实现查 picker 行缓存，缓存为空时一律报未知源）、未知源仍
 // 被拒、`--dry-run` 要源、多源报 usage、重开选择器清空上一轮勾选。
