@@ -1,16 +1,34 @@
 /**
  * zcode adapter: `~/.zcode/v2/sessions/<dir>/<taskId>.json`, one JSON object
  * per conversation. Discovery lives here; the document is parsed by the pure
- * zcode.parse.ts.
+ * zcode.parse.ts. A JSON document has no usable head, so the browse scan
+ * parses each changed file whole (they are small; unchanged ones are reused
+ * by fingerprint).
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/zcode
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { MigrationAdapter, MigrationDiscovery, MigrationSession } from '../types.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
 import { countEntries } from './scan.js'
+import { fingerprintOf, loadText, runScan, walkFiles, type ScanCandidate } from './scan-fs.js'
 import { parseZcodeSession } from './zcode.parse.js'
+
+async function summarize({ ref, fp }: ScanCandidate): Promise<ForeignSessionSummary | null> {
+  const raw = await loadText(ref)
+  const session = typeof raw === 'string' ? parseZcodeSession(raw) : undefined
+  if (session === undefined) return null
+  return {
+    agentId: 'zcode',
+    sessionKey: session.sourceId,
+    ref,
+    title: session.title ?? '',
+    cwd: session.cwd,
+    lastMessageAt: fp.mtimeMs,
+    createdAt: session.startedAt || fp.mtimeMs,
+  }
+}
 
 function readOne(path: string): MigrationSession | undefined {
   try {
@@ -54,5 +72,20 @@ export const zcodeAdapter: MigrationAdapter = {
   },
   count(): number {
     return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.json') })
+  },
+  async scan(options?: ScanOptions) {
+    const roots = this.roots()
+    const candidates = async function* (): AsyncGenerator<ScanCandidate> {
+      for await (const file of walkFiles(roots, { maxDepth: 3, match: name => name.endsWith('.json'), signal: options?.signal })) {
+        const fp = await fingerprintOf(file.path)
+        if (fp !== undefined) yield { ref: file.path, fp }
+      }
+    }
+    return runScan(candidates(), options, summarize)
+  },
+  async load(ref: string): Promise<MigrationSession | LoadSkip> {
+    const raw = await loadText(ref)
+    if (typeof raw !== 'string') return raw
+    return parseZcodeSession(raw) ?? { skip: 'not-a-session' }
   },
 }

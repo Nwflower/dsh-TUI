@@ -138,6 +138,71 @@ const keyed = entries => entries.filter(e => e.summary !== null).map(e => e.summ
   check('2g. 指纹未变时整轮命中缓存（含否定结果）仍按会话回报', rescanned.sort().join(',') === 'aaaa,bbbb')
 }
 
+// ── 3. codex / grok-build / zcode scan()/load() ─────────────────────────
+{
+  const { codexAdapter } = await import('../src/dsh-adapter/migrate/adapters/codex.js')
+  const { grokBuildAdapter } = await import('../src/dsh-adapter/migrate/adapters/grok-build.js')
+  const { zcodeAdapter } = await import('../src/dsh-adapter/migrate/adapters/zcode.js')
+  const discoveredKeys = adapter => adapter.discover().sessions.map(s => s.sourceId).sort()
+
+  // codex：主 rollout（首问前有很大的 base_instructions，逼出第二级头窗口）+ 子代理 rollout
+  const day = join(home, '.codex', 'sessions', '2026', '09', '01')
+  mkdirSync(day, { recursive: true })
+  const uuid = n => `0199aaaa-0000-7000-8000-00000000000${n}`
+  const meta = (extra = {}) => ({ timestamp: '2026-09-01T00:00:00Z', type: 'session_meta', payload: { id: 'x', cwd: '/w/codex', timestamp: '2026-09-01T00:00:00Z', base_instructions: '规则'.repeat(20000), ...extra } })
+  const item = payload => ({ timestamp: '2026-09-01T00:00:01Z', type: 'response_item', payload })
+  const ask = text => item({ type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>env</environment_context>' }, { type: 'input_text', text }] })
+  writeFileSync(join(day, `rollout-2026-09-01T00-00-00-${uuid(1)}.jsonl`), jsonl([meta(), ask('Codex 主会话提问'), item({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '答' }] })]))
+  writeFileSync(join(day, `rollout-2026-09-01T00-00-01-${uuid(2)}.jsonl`), jsonl([meta({ thread_source: 'subagent' }), ask('子代理任务')]))
+  const codexEntries = await codexAdapter.scan()
+  const codexSummaries = keyed(codexEntries)
+  check('3a. codex：子代理 rollout 为 null；首问在 32KB 之外也能取到；注入块不进标题',
+    codexEntries.length === 2 && codexSummaries.length === 1 && codexSummaries[0].title === 'Codex 主会话提问' && codexSummaries[0].cwd === '/w/codex',
+    codexSummaries.map(s => s.title).join('|'))
+  check('3b. codex：sessionKey 等于 discover 的 sourceId（文件名中的 uuid）',
+    JSON.stringify(codexSummaries.map(s => s.sessionKey)) === JSON.stringify(discoveredKeys(codexAdapter)) && codexSummaries[0].sessionKey === uuid(1))
+  check('3c. codex：load(ref) 与 discover 逐字段一致',
+    JSON.stringify(await codexAdapter.load(codexSummaries[0].ref)) === JSON.stringify(codexAdapter.discover().sessions[0]))
+
+  // grok：一个有真实提问的会话目录 + 一个只有注入的会话目录
+  const grokSession = (id, rows, summary = {}) => {
+    const dir = join(home, '.grok', 'sessions', '%2Fw%2Fgrok', id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'summary.json'), JSON.stringify({ info: { id, cwd: '/w/grok' }, created_at: '2026-09-01T00:00:00Z', ...summary }))
+    writeFileSync(join(dir, 'chat_history.jsonl'), jsonl(rows))
+    return dir
+  }
+  const grokDir = grokSession('grok-1', [
+    { type: 'user', content: [{ type: 'text', text: '<user_info>OS</user_info>' }] },
+    { type: 'user', content: [{ type: 'text', text: '<user_query>Grok 提问</user_query>' }] },
+    { type: 'assistant', content: '答', model_id: 'grok-x' },
+  ], { session_summary: 'Grok 会话标题' })
+  grokSession('grok-2', [{ type: 'user', content: [{ type: 'text', text: '<user_info>OS</user_info>' }] }])
+  const grokEntries = await grokBuildAdapter.scan()
+  const grokSummaries = keyed(grokEntries)
+  check('3d. grok：一个目录一个条目，ref 是会话目录；只有注入的会话为 null；标题取 session_summary',
+    grokEntries.length === 2 && grokSummaries.length === 1 && grokSummaries[0].ref === grokDir && grokSummaries[0].title === 'Grok 会话标题')
+  check('3e. grok：sessionKey 等于 discover 的 sourceId（info.id），load 与 discover 一致',
+    JSON.stringify(grokSummaries.map(s => s.sessionKey)) === JSON.stringify(discoveredKeys(grokBuildAdapter))
+    && JSON.stringify(await grokBuildAdapter.load(grokDir)) === JSON.stringify(grokBuildAdapter.discover().sessions[0]))
+  const before = grokEntries.find(e => e.ref === grokDir).fp
+  writeFileSync(join(grokDir, 'summary.json'), JSON.stringify({ info: { id: 'grok-1', cwd: '/w/grok' }, session_summary: '改过的标题 更长一些' }))
+  const after = (await grokBuildAdapter.scan()).find(e => e.ref === grokDir).fp
+  check('3f. grok：指纹复合两个文件，只改 summary.json 也会失效', before.size !== after.size || before.mtimeMs !== after.mtimeMs)
+
+  // zcode：{meta, messages} 文档 + 一个坏文档
+  const zdir = join(home, '.zcode', 'v2', 'sessions', 'w')
+  mkdirSync(zdir, { recursive: true })
+  writeFileSync(join(zdir, 'task-9.json'), JSON.stringify({ meta: { taskId: 'task-9', workspacePath: '/w/zc', title: 'zcode 标题', createdAt: 1790000000000 }, messages: [{ role: 'user', content: 'zcode 提问' }, { role: 'assistant', content: '答' }] }))
+  writeFileSync(join(zdir, 'broken.json'), '{')
+  const zcEntries = await zcodeAdapter.scan()
+  const zcSummaries = keyed(zcEntries)
+  check('3g. zcode：整读解析，坏文档为 null；sessionKey 等于 meta.taskId，load 与 discover 一致',
+    zcEntries.length === 2 && zcSummaries.length === 1 && zcSummaries[0].title === 'zcode 标题' && zcSummaries[0].createdAt === 1790000000000
+    && JSON.stringify(zcSummaries.map(s => s.sessionKey)) === JSON.stringify(discoveredKeys(zcodeAdapter))
+    && JSON.stringify(await zcodeAdapter.load(zcSummaries[0].ref)) === JSON.stringify(zcodeAdapter.discover().sessions[0]))
+}
+
 for (const [key, value] of Object.entries(savedEnv)) {
   if (value === undefined) delete process.env[key]
   else process.env[key] = value

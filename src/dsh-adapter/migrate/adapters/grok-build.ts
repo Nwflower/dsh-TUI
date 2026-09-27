@@ -2,16 +2,47 @@
  * grok-build adapter: `~/.grok/sessions/<encoded-cwd>/<uuid>/` — each session
  * directory holds a `summary.json` and a `chat_history.jsonl`. Discovery and
  * the `GROK_HOME` override live here; both files are parsed by the pure
- * grok-build.parse.ts.
+ * grok-build.parse.ts. A session directory is one browse entry: its
+ * fingerprint combines both files, and its summary comes from the whole
+ * summary.json plus the head of the history.
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/grok-build
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { MigrationAdapter, MigrationDiscovery, MigrationSession } from '../types.js'
+import type { Fingerprint, ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions } from '../types.js'
 import { parseGrokSession } from './grok-build.parse.js'
 import { countEntries } from './scan.js'
+import { fingerprintOf, loadText, runScan, walkFiles, withHead, type ScanCandidate } from './scan-fs.js'
+
+const HISTORY_FILE = 'chat_history.jsonl'
+const SUMMARY_FILE = 'summary.json'
+
+/** One change token for both files of a session directory. */
+async function directoryFingerprint(dir: string): Promise<Fingerprint | undefined> {
+  const history = await fingerprintOf(join(dir, HISTORY_FILE))
+  const summary = await fingerprintOf(join(dir, SUMMARY_FILE))
+  if (history === undefined || summary === undefined) return undefined
+  return { mtimeMs: Math.max(history.mtimeMs, summary.mtimeMs), size: history.size + summary.size }
+}
+
+async function summarize({ ref, fp }: ScanCandidate): Promise<ForeignSessionSummary | null> {
+  const summaryJson = await loadText(join(ref, SUMMARY_FILE))
+  const history = await fingerprintOf(join(ref, HISTORY_FILE))
+  if (typeof summaryJson !== 'string' || history === undefined) return null
+  const session = await withHead(join(ref, HISTORY_FILE), history.size, chatHistory => parseGrokSession({ summaryJson, chatHistory }))
+  if (session === undefined) return null
+  return {
+    agentId: 'grok-build',
+    sessionKey: session.sourceId,
+    ref,
+    title: session.title ?? '',
+    cwd: session.cwd,
+    lastMessageAt: fp.mtimeMs,
+    createdAt: session.startedAt || fp.mtimeMs,
+  }
+}
 
 function readOne(dir: string): MigrationSession | undefined {
   let summaryJson: string
@@ -61,6 +92,23 @@ export const grokBuildAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 2, fileMatch: name => name === 'chat_history.jsonl' })
+    return countEntries(this.roots(), { maxDepth: 2, fileMatch: name => name === HISTORY_FILE })
+  },
+  async scan(options?: ScanOptions) {
+    const roots = this.roots()
+    const candidates = async function* (): AsyncGenerator<ScanCandidate> {
+      for await (const file of walkFiles(roots, { maxDepth: 2, match: name => name === HISTORY_FILE, signal: options?.signal })) {
+        const fp = await directoryFingerprint(file.dir)
+        if (fp !== undefined) yield { ref: file.dir, fp }
+      }
+    }
+    return runScan(candidates(), options, summarize)
+  },
+  async load(ref: string): Promise<MigrationSession | LoadSkip> {
+    const summaryJson = await loadText(join(ref, SUMMARY_FILE))
+    if (typeof summaryJson !== 'string') return summaryJson
+    const chatHistory = await loadText(join(ref, HISTORY_FILE))
+    if (typeof chatHistory !== 'string') return chatHistory
+    return parseGrokSession({ summaryJson, chatHistory }) ?? { skip: 'not-a-session' }
   },
 }
