@@ -1,7 +1,7 @@
 # dsh-tui 会话屏「外部来源」标签页 + 迁移源重构：详细设计
 
 - 日期：2026-09-26
-- 状态：PR1（解析层 + sessionize v2）已实现，实现中的偏离已写回本文（§4.2、§4.3、§6）；PR2、PR3 待实现
+- 状态：PR1（解析层 + sessionize v2）与 PR2（摘要扫描、catalog、单会话导入、channel facade）已实现，实现中的偏离已写回本文（§2–§7）；PR3（UI）待实现
 - 范围：`src/dsh-adapter/migrate/`（四个源的解析重构）、会话屏（`/resume` / `/agentview` / `/home`）新增外部来源标签页
 - 参考：dsh-chat-import（DSH 插件，同样做外部会话导入）的格式处理。本文只借鉴规则，**不依赖**该插件——用户不一定装了它
 
@@ -49,7 +49,9 @@ UI 层（screens/、components/，不得 import @deepseek-ai/*）
         └─ tab = <agent> → ForeignSessionPanes（新）← useForeignSessions（新）
                                     │
 channel facade（adapter/ports/channel-ui.ts + dsh-adapter/channel/foreign-sessions.ts，新）
-  listForeignSources() / listForeignSessions(agent, onEntry) / importForeignSession(agent, ref)
+  foreignSources() / refreshForeignSources()                  来源（同步读上次结果 / 后台重新探测）
+  foreignSessions(agent) / refreshForeignSessions(agent, onEntry)  会话（同上）
+  importForeignSession(agent, ref)                           选中即导入
                                     │
 dsh-adapter/migrate/
   catalog.ts（新）      轻量摘要扫描 + 指纹缓存 + 快照持久化
@@ -91,10 +93,13 @@ interface MigrationAdapter {
   readonly id: string
   readonly label: string
   roots(): readonly string[]
-  /** 新：异步、可中止、逐条回调的摘要扫描；用 fingerprint 判断是否复用缓存。可选：OMP 本期不实现。 */
-  scan?(opts: { signal?: AbortSignal, cached(ref: string, fp: Fingerprint): ForeignSessionSummary | undefined,
-                onEntry?(s: ForeignSessionSummary): void }): Promise<ScanResult>
-  /** 新：全量解析单个会话。可选：OMP 本期不实现。 */
+  /** 新：按名字遍历的描述（深度、文件名匹配、跳过目录），scan()、count() 与来源探测共用。 */
+  readonly walk?: WalkSpec
+  /** 新：异步、可中止、逐条回调的摘要扫描；cached 返回 summary / null（已知不是会话）/ undefined（未知，需读取）。
+   *  返回每个候选的 { ref, fp, summary | null }，否定结果也进缓存。可选：OMP 本期不实现。 */
+  scan?(opts?: { signal?: AbortSignal, cached?(ref: string, fp: Fingerprint): ForeignSessionSummary | null | undefined,
+                 onEntry?(s: ForeignSessionSummary): void }): Promise<readonly ScanEntry[]>
+  /** 新：全量解析单个会话；LoadSkip = missing / too-large / not-a-session。可选：OMP 本期不实现。 */
   load?(ref: string): Promise<MigrationSession | LoadSkip>
   /** 保留（/migrate、CLI 在用）：四个源由 scan + load 组合实现，语义不变。 */
   discover(): MigrationDiscovery
@@ -219,17 +224,18 @@ CLI 的 dry-run 只用到了 `session.turns.length`（显示为「N messages」�
 | zcode | `meta.title` | `meta.workspacePath` | 文件 mtime | — |
 | grok-build | `generated_title` > `session_summary` > 首个 `<user_query>` 正文 | `info.cwd` | max(summary、chat_history 的 mtime) | 没有真实提问的会话 |
 
-读头上限 256KB。
+实现：摘要直接由 PR1 的同一个解析函数在文件头上得出，因此过滤规则与全量导入一致，`sessionKey` 恒等于 `sourceId`。头窗口逐级扩大（先 32KB，取不到提问再读 256KB），窗口按字节截断并丢掉残行；claude-code 在文件大于头窗口时再读 64KB 尾窗口取最后一次 `/rename`；zcode 是 JSON 文档没有可用的头部，变化的文件整读（体量小）。
 
 ### 5.2 缓存
 - **指纹**：`{ mtimeMs, size }`（grok 用两个文件的复合指纹）。指纹不变就直接复用摘要，不再读文件。
 - **快照持久化**：写到 `~/.dsh-tui/foreign-catalog.v1.json`，按 agent → ref 存 `{ fp, summary }`。写入用原子 rename；读到损坏的文件就当作空。
 - **stale-while-revalidate**（与 #1007 同一思路）：打开标签页时先用快照画出列表，后台重扫（readdir + stat 全量，只对变化的文件读头）。扫完用 generation 保护发布，同 `ListingSnapshotSlot` 的做法，晚到的旧扫描不能覆盖新结果。
 - **不阻塞渲染**：全部使用 `fs/promises`，每处理 N 个文件主动让出一次（`setImmediate`）。现有 adapter 用的同步 fs 只保留在 `discover()` 兼容路径里。
-- **性能目标**（实现时在本机实测并写进 PR 描述）：有快照时首帧 < 100ms；冷扫约 3000 个文件 < 2s；热扫（无变化）< 300ms。
+- **性能目标**：有快照时首帧 < 100ms；冷扫约 3000 个文件 < 2s；热扫（无变化）< 300ms。
+- **实测**（`scripts/probe-foreign-catalog.mjs`，维护者本机 129 个文件、115 个会话）：探测 37ms、冷扫 174ms、热扫 35ms、快照首帧 1ms、单会话导入 14–140ms。冷扫折算约 1.35ms/文件，3000 个文件量级约 4s，可能超出冷扫目标；只影响没有快照的第一次打开（之后是热扫），需要在大数据量机器上复测再决定是否优化（例如缩小首个头窗口）。
 
 ### 5.3 标签页来源探测
-- 会话屏打开时后台执行：对四个源各做一次**名字匹配计数**，同时取**最新 mtime**。现有 `countEntries` 和 `collectNewestMtime` 可合并为一次遍历，亚秒级。
+- 会话屏打开时后台执行：按各源的 `walk` 描述异步遍历，统计**候选文件数**并取**最新 mtime**（`ForeignCatalog.refreshSources`）。计数的是候选文件，少数可能在摘要阶段被判为非会话（子代理、辅助 transcript）。
 - 计数 > 0 的来源才出 tab，按最新 mtime 降序排列，DSH 固定在第一个。
 - 探测结果随快照一起持久化，下次打开时 tab 条立刻可见，之后再更新。
 
@@ -267,15 +273,18 @@ session/title                          （仅显式标题，末尾写入）
 ```
 点击 / Enter 外部会话行
   → channel.importForeignSession(agentId, ref)
-      1. id = migrationSessionId(agentId, sessionKey)
-      2. 宿主 persistence 中已存在该 id → 直接返回 { id, created: false }
-      3. adapter.load(ref) → sessionize（在内存中完成并通过校验）→ persistence.create(header) → append → flush → close
-      4. 返回 { id, created: true }
+      1. id = foreignSessionId(agentId, sessionKey)（与 /migrate 同算法）
+      2. 已存在（persistence.stat，旧后端回退 list）→ { kind:'ready', created:false }
+      3. 行上的 cwd 不存在 → { kind:'cwd-missing' }
+      4. adapter.load(ref)（跳过原因 → { kind:'failed' }）→ 再查一次加载后的 cwd
+      5. 源在列出后换了身份时，id 按加载内容重算并再查一次是否已存在
+      6. sessionize（内存中）→ create → append → flush → close；写入失败时尽力删除半截日志 → { kind:'failed', reason:'write-failed' }
+      7. { kind:'ready', created:true }
   → onOpenSession(id)   （复用现有的 channel.resumeTo 路径：切换工作区、关闭会话屏、重绘）
 ```
 
 - **cwd 预检**：导入前检查 `cwd` 是否存在。不存在时在底部状态行提示「工作目录不存在：<path>」，不导入。
-- **防重入**：同一个 ref 正在导入时，再次点击直接忽略。状态行显示「正在导入 <标题>…」。
+- **防重入**：同一个 ref 正在导入时，再次请求并入进行中的那一次（返回同一个 Promise），不会写两次。状态行显示「正在导入 <标题>…」。
 - **失败面最小化**：先在内存里完成解析和 sessionize，全部成功后才开始写盘，把失败面压缩到 IO 本身，避免留下半截日志、而下次点击又被当作「已存在」直接打开。失败时留在会话屏，状态行显示原因。
 - **耗时**：大会话的解析可能达到秒级。本期使用异步分片并在状态行显示进度，暂不引入 worker_threads。
 - **导入后的标题**：显式标题写 `session/title` 事件；首问兜底的不写，让 DSH 自己回退到首条 user 文本。
