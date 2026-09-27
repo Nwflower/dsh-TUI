@@ -32,6 +32,16 @@
  * the imported history, where adapters that only lift a LEADING system
  * message (pi-ai) send it as one more user message.
  *
+ * Compaction: a turn carrying {@link ImportTurn.compaction} is preceded by
+ * one native compaction transaction — `compaction/start` (standalone,
+ * `turn: null`), `compaction/summary`, the checkpoint `user/message` that
+ * REPLACES every surface node after the head, `compaction/end` — the same
+ * shape `/compact` writes. The raw log keeps the shadowed events (replay
+ * stays exact) while the model sees the checkpoint plus what follows, which
+ * is the context the source agent itself continued with. The upstream
+ * compaction package is not a dependency here, so its event and source
+ * shapes are written structurally (see compactionEvents below).
+ *
  * Title: only a title the SOURCE owns (`titleExplicit`) is written, as one
  * trailing `session/title` — a first-prompt fallback is left out so DSH
  * derives it from the first user message exactly as for a native session.
@@ -57,6 +67,18 @@ import {
 import { userTitleData } from '../compat/sessionLog.js'
 import { normalizeTitle } from './parse/title.js'
 import type { ImportStep, MigrationSession } from './types.js'
+
+/** Structural view of `append` for event types this package cannot name:
+ *  the compaction events are declared by @deepseek-ai/dsh-compaction, which
+ *  dsh-tui does not depend on. `Session.append` validates them at runtime. */
+interface UntypedAppend {
+  append(type: string, data: unknown, intent?: unknown): SessionEvent
+}
+
+/** Rough token estimate for shadowed text (the compaction metering field). */
+function estimateTokens(chars: number): number {
+  return Math.ceil(chars / 4)
+}
 
 /** One migration turn's model-visible outcome, ready for persistence. */
 export interface SessionizedLog {
@@ -107,6 +129,7 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
   }
   const writePrompt = (prompt: string): void => {
     if (prompt === '') return
+    surfaceChars += prompt.length
     events.push(model.append('user/message', createUserMessage({
       content: [{ type: 'text', text: prompt }],
       source: { kind: 'user' },
@@ -134,18 +157,61 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
       }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] }))
     }
   }
+  let compactions = 0
+  // Text volume on the surface since the last checkpoint, for the summary's
+  // shadowedTokenCount (an estimate, like the live engine's).
+  let surfaceChars = 0
+  /** Fold every surface node after the head into one checkpoint; false when
+   *  there is nothing to fold (the upstream contract needs a non-empty span). */
+  const writeCompaction = (summary: string, summaryModel: string | undefined): boolean => {
+    const shadowed = model.surface.nodes.filter(seq => model.eventAt(seq)?.type !== 'system/message')
+    if (shadowed.length === 0) return false
+    compactions += 1
+    const compactionId = `import:${id}:c${compactions}`
+    const untyped = model as unknown as UntypedAppend
+    const range = { start: shadowed[0]!, end: shadowed[shadowed.length - 1]! }
+    events.push(untyped.append('compaction/start', { compactionId, turn: null }))
+    events.push(untyped.append('compaction/summary', {
+      compactionId,
+      summary: [{ type: 'text', text: summary }],
+      shadowedRange: range,
+      shadowedSeqs: shadowed,
+      shadowedTokenCount: estimateTokens(surfaceChars),
+      provider: `migrated:${agentId}`,
+      model: summaryModel ?? agentId,
+    }))
+    events.push(untyped.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: summary }],
+      // The compaction package's checkpoint marker (COMPACT_CHECKPOINT_MARKER).
+      source: { kind: 'compact-checkpoint', compactionId } as unknown as { kind: 'user' },
+    }), { surfaceOp: { op: 'replace', startSeq: range.start, endSeq: range.end }, sourceEventSeqs: shadowed }))
+    events.push(untyped.append('compaction/end', { compactionId, turn: null }))
+    surfaceChars = summary.length
+    return true
+  }
   let turnIndex = 0
   for (const turn of session.turns) {
+    // A summary with nothing before it to fold still reaches the model: it
+    // opens the turn as a plain user message instead.
+    let preface = ''
+    if (turn.compaction !== undefined && turn.compaction.summary !== '') {
+      if (!writeCompaction(turn.compaction.summary, turn.compaction.model)) preface = turn.compaction.summary
+      // A boundary with no prompt and no step (the source stopped right at
+      // the compaction) needs no turn of its own.
+      if (turn.prompt === '' && turn.steps.length === 0 && preface === '') continue
+    }
     turnIndex += 1
     events.push(model.append('turn/start', { turn: turnIndex }))
     if (turn.steps.length === 0) {
       if (headWritten) {
+        writePrompt(preface)
         writePrompt(turn.prompt)
       } else {
         // The head needs an open step; a step-less first turn gets one that
         // carries only the head and the prompt (no model call).
         events.push(model.append('step/start', { turn: turnIndex, step: 1 }))
         writeHead(turnIndex, 1)
+        writePrompt(preface)
         writePrompt(turn.prompt)
         events.push(model.append('step/end', { turn: turnIndex, step: 1 }))
       }
@@ -155,8 +221,13 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
       step += 1
       events.push(model.append('step/start', { turn: turnIndex, step }))
       if (!headWritten) writeHead(turnIndex, step)
-      if (step === 1) writePrompt(turn.prompt)
+      if (step === 1) {
+        writePrompt(preface)
+        writePrompt(turn.prompt)
+      }
       for (const input of imported.inputs) writePrompt(input)
+      for (const block of imported.blocks) surfaceChars += block.type === 'tool-call' ? block.arguments.length : block.text.length
+      for (const result of imported.results) surfaceChars += result.text.length
       events.push(model.append('assistant/message', {
         turn: turnIndex,
         step,

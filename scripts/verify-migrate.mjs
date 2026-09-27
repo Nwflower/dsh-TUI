@@ -345,6 +345,76 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   rmSync(rootTools, { recursive: true, force: true })
 }
 
+// ── 4c''. 压缩检查点：原生压缩事务 + 读回后模型只见「检查点 + 之后」─────────
+{
+  const { newStep } = await import('../src/dsh-adapter/migrate/parse/tools.js')
+  const answer = (text, calls = []) => {
+    const step = newStep()
+    step.blocks.push({ type: 'text', text }, ...calls.map(id => ({ type: 'tool-call', id, name: 'bash', arguments: '{}' })))
+    for (const id of calls) step.results.push({ callId: id, text: `${id} 输出`, isError: false })
+    return step
+  }
+  const compacted = {
+    sourceId: '66666666-6666-4666-8666-666666666666', cwd: '/tmp/compact', startedAt: 1790000500000,
+    titleExplicit: false, stats: emptyStats(),
+    turns: [
+      { prompt: '压缩前的提问', steps: [answer('压缩前的回答', ['c1'])] },
+      { prompt: '压缩后的提问', compaction: { summary: '第一次压缩摘要', model: 'src-model' }, steps: [answer('压缩后的回答')] },
+      { prompt: '', compaction: { summary: '第二次压缩摘要' }, steps: [answer('续跑的回答')] },
+      // 会话正好停在压缩点：只有边界、没有提问与回复，不单独成轮
+      { prompt: '', compaction: { summary: '尾部压缩摘要' }, steps: [] },
+    ],
+  }
+  const id = migrationSessionId(fakeAdapter, compacted)
+  const { events } = sessionize(id, 'fixture', compacted)
+  const types = events.map(e => e.type)
+  const starts = types.filter(t => t === 'compaction/start').length
+  check("4c''1. 每个边界一次原生压缩事务（start→summary→检查点→end，位于 turn/start 之前）",
+    starts === 3 && types.join(' ').includes('turn/end compaction/start compaction/summary user/message compaction/end turn/start'),
+    types.join(' '))
+  const ckpts = events.filter(e => e.type === 'user/message' && e.data.source?.kind === 'compact-checkpoint')
+  const summaries = events.filter(e => e.type === 'compaction/summary')
+  const head = events.find(e => e.type === 'system/message')
+  const first = ckpts[0]
+  check("4c''2. 检查点 replace 覆盖 head 之后的全部节点，sourceEventSeqs = shadowedSeqs",
+    first !== undefined && typeof first.surfaceOp === 'object' && first.surfaceOp.startSeq > head.seq
+    && JSON.stringify(first.sourceEventSeqs) === JSON.stringify(summaries[0].data.shadowedSeqs)
+    && first.surfaceOp.startSeq === summaries[0].data.shadowedRange.start && first.surfaceOp.endSeq === summaries[0].data.shadowedRange.end
+    && first.data.source.compactionId === summaries[0].data.compactionId && summaries[0].data.model === 'src-model')
+  check("4c''3. 第二次压缩遮蔽上一个检查点及其后的节点",
+    summaries[1]?.data.shadowedSeqs[0] === ckpts[0].seq)
+  check("4c''4. 停在压缩点的尾部边界不产生空轮",
+    types.filter(t => t === 'turn/start').length === 3)
+
+  const rootC = mkdtempSync(join(tmpdir(), 'verify-migrate-compact-'))
+  const run = await importSessions(fakeAdapter, rootC, [compacted])
+  const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  const { Context } = await import('@deepseek-ai/cordis')
+  const ctxC = new Context()
+  const fiberC = ctxC.plugin(JsonlSessionPersistence, { root: rootC })
+  for (let i = 0; i < 100 && ctxC.get('sessionPersistence') === undefined; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  const h = await ctxC.get('sessionPersistence').open(id, 'read')
+  const r = await h.read()
+  await h.close()
+  const texts = Session.fromRestore(id, r.events, h.header, SessionLogOffset(0), r.eventState).deriveMessages()
+    .map(m => `${m.role}:${m.content.map(b => b.text ?? '').join('')}`)
+  check("4c''5. 落盘读回：模型只见最后一个检查点 + 其后的对话，原始事件仍在日志里",
+    run.imported === 1 && texts.join('|') === 'user:尾部压缩摘要'
+    && r.events.some(e => e.type === 'user/message' && e.data.content?.[0]?.text === '压缩前的提问'),
+    texts.join('|'))
+  await Promise.resolve(fiberC.dispose()).catch(() => {})
+  rmSync(rootC, { recursive: true, force: true })
+
+  // 边界之前没有可折叠的节点：摘要作为首轮开头的一条 user 消息，不发事务
+  const early = { ...compacted, turns: [{ prompt: '第一问', compaction: { summary: '无处可折的摘要' }, steps: [answer('答')] }] }
+  const earlyEvents = sessionize(id, 'fixture', early).events
+  const users = earlyEvents.filter(e => e.type === 'user/message').map(e => e.data.content[0].text)
+  check("4c''6. 无可遮蔽节点时不发事务，摘要落为首条 user 消息",
+    !earlyEvents.some(e => e.type === 'compaction/start') && users.join('|') === '无处可折的摘要|第一问', users.join('|'))
+}
+
 // ── 4d. 单会话失败不中断批次（deep-review M6：容错路径必须被触发）────────
 {
   const good1 = fixtureSessions()[0]
