@@ -149,6 +149,15 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
         }
         return
       }
+      case 'reasoning': {
+        // The readable part is the summary; `encrypted_content` is opaque
+        // provider state and is never copied.
+        const text = Array.isArray(payload.summary)
+          ? payload.summary.filter(isRecord).map(part => part.text).filter((part): part is string => typeof part === 'string' && part.trim() !== '').join('\n\n')
+          : ''
+        if (text !== '') modelStep().blocks.push({ type: 'reasoning', text })
+        return
+      }
       case 'function_call':
       case 'custom_tool_call': {
         const id = typeof payload.call_id === 'string' && payload.call_id !== '' ? payload.call_id : `codex-call-${++unnamedCalls}`

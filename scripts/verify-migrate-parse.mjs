@@ -395,4 +395,24 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
   check('7j. 找不到调用的输出计入 droppedToolResults', session.stats.droppedToolResults === 1)
 }
 
+{
+  const reasoning = (...texts) => cxItem({ type: 'reasoning', summary: texts.map(text => ({ type: 'summary_text', text })), encrypted_content: 'gAAAA-opaque' })
+  const session = cxParse([
+    cxMeta(),
+    cxUser('q'),
+    reasoning('**计划** 先读文件', '再改'),
+    cxItem({ type: 'function_call', call_id: 'f1', name: 'shell', arguments: '{}' }),
+    cxItem({ type: 'function_call_output', call_id: 'f1', output: 'ok' }),
+    reasoning('读完了，开始回答'),
+    cxAsst('答复'),
+    reasoning(),
+  ])
+  const steps = session.turns[0].steps
+  check('7k. reasoning 摘要作为所属模型调用的 reasoning 块，位于该步最前',
+    steps.length === 2 && steps[0].blocks[0].type === 'reasoning' && steps[0].blocks[0].text === '**计划** 先读文件\n\n再改'
+    && steps[1].blocks.map(b => b.type).join(',') === 'reasoning,text')
+  check('7l. encrypted_content 不进入导入内容；空摘要不产生块',
+    !JSON.stringify(session).includes('gAAAA') && steps.length === 2)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
