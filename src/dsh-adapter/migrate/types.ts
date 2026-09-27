@@ -21,6 +21,63 @@ export interface MigrationTurn {
   readonly time: number
 }
 
+/** One assistant content block of an imported step. */
+export type ImportBlock =
+  | { readonly type: 'text', readonly text: string }
+  | { readonly type: 'reasoning', readonly text: string }
+  | { readonly type: 'tool-call', readonly id: string, readonly name: string, readonly arguments: string }
+
+/** The model-facing result of one tool call, paired by call id. */
+export interface ImportToolResult {
+  readonly callId: string
+  /** Result text; images are replaced by a placeholder, oversize text is clamped. */
+  readonly text: string
+  readonly isError: boolean
+}
+
+/** One model call and the tool executions it requested. */
+export interface ImportStep {
+  /** User-role messages entering this step before the model answers (mid-turn
+   *  context such as skill bodies or image notes — never the turn's prompt). */
+  inputs: string[]
+  blocks: ImportBlock[]
+  /** Results for this step's tool-call blocks; after closeToolPairs() exactly
+   *  one per call, in call order. */
+  results: ImportToolResult[]
+  /** Source-recorded model id for this step, when available. */
+  model?: string
+}
+
+/** A context-compaction boundary the source recorded before a turn. */
+export interface ImportCompaction {
+  readonly summary: string
+  readonly model?: string
+}
+
+/** One imported turn: a human prompt and the steps that answered it. */
+export interface ImportTurn {
+  /** The human prompt; '' when the turn has none (source lost its head, or
+   *  the turn only carries a compaction checkpoint). */
+  prompt: string
+  /** A compaction checkpoint emitted BEFORE this turn opens. */
+  compaction?: ImportCompaction
+  steps: ImportStep[]
+  /** The source recorded this turn as interrupted. */
+  aborted?: boolean
+}
+
+/** Per-conversation counters for what parsing had to leave out. */
+export interface ImportStats {
+  /** Lines that were not valid JSON. */
+  badLines: number
+  /** Tool results with no matching call, or a second result for one call. */
+  droppedToolResults: number
+  /** Harness-injected user rows that were not imported. */
+  filtered: number
+  /** Mid-turn machine context folded into a step's inputs (Claude isMeta, …). */
+  meta: number
+}
+
 /** A discovered foreign conversation, ready for conversion. */
 export interface MigrationSession {
   /** Stable id in the SOURCE store (file uuid, rollout id, …). */

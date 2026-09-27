@@ -97,4 +97,60 @@ function check(name, ok, extra = '') {
   check('3e. 按码点截断，不拆代理对', emoji.isWellFormed() && Array.from(emoji).length === TITLE_MAX_CHARS)
 }
 
+// ── 4. 工具调用配对 ─────────────────────────────────────────────────────
+{
+  const { CallIndex, closeToolPairs, clampToolText, newStep, TOOL_RESULT_MAX_BYTES } =
+    await import('../src/dsh-adapter/migrate/parse/tools.js')
+  const call = (id, name = 'read') => ({ type: 'tool-call', id, name, arguments: '{}' })
+  // Claude 形态：两条连续 assistant 各带一个调用，结果在两步之后才到，且乱序
+  const s1 = newStep('m1')
+  s1.blocks.push({ type: 'text', text: '先读两个文件' }, call('a'), call('b'))
+  const s2 = newStep()
+  s2.blocks.push(call('c'))
+  const index = new CallIndex()
+  index.register(s1)
+  index.register(s2)
+  index.attach('c', 'C 的结果', false)
+  index.attach('b', 'B 的结果', true)
+  index.attach('a', 'A 的结果', false)
+  const orphan = index.attach('zz', '孤儿', false)
+  check('4a. 迟到结果挂回发起调用的那一步（不是最近一步）',
+    s1.results.map(r => r.callId).sort().join(',') === 'a,b' && s2.results.map(r => r.callId).join(',') === 'c')
+  check('4b. 找不到调用的结果丢弃并计数', orphan === false && index.orphans === 1)
+  const turns = [{ prompt: 'q', steps: [s1, s2] }]
+  closeToolPairs(turns)
+  check('4c. 同一步内结果按调用顺序排列', s1.results.map(r => r.callId).join(',') === 'a,b')
+  check('4d. isError 原样保留', s1.results[1].isError === true && s1.results[0].isError === false)
+
+  // 无结果的调用补空结果；重复结果只留第一条；不属于本步的结果丢弃
+  const s3 = newStep()
+  s3.blocks.push(call('x'), call('y'))
+  s3.results.push({ callId: 'y', text: 'Y1', isError: false }, { callId: 'y', text: 'Y2', isError: false },
+    { callId: 'stray', text: '?', isError: false })
+  const dropped = closeToolPairs([{ prompt: 'q', steps: [s3] }])
+  check('4e. 无结果的调用补空结果，每个调用恰好一条结果',
+    s3.results.length === 2 && s3.results[0].callId === 'x' && s3.results[0].text === '' && s3.results[1].text === 'Y1')
+  check('4f. 重复结果与游离结果计入丢弃', dropped === 2, `dropped=${dropped}`)
+
+  // 跨步复用同一 call id：后者改名，结果随之改名
+  const r1 = newStep()
+  r1.blocks.push(call('dup'))
+  r1.results.push({ callId: 'dup', text: '第一次', isError: false })
+  const r2 = newStep()
+  r2.blocks.push(call('dup'))
+  r2.results.push({ callId: 'dup', text: '第二次', isError: false })
+  closeToolPairs([{ prompt: 'q', steps: [r1] }, { prompt: 'q2', steps: [r2] }])
+  check('4g. 跨步重复的 call id 改名且结果跟随',
+    r1.blocks[0].id === 'dup' && r2.blocks[0].id === 'dup#2' && r2.results[0].callId === 'dup#2' && r2.results[0].text === '第二次')
+
+  // 64KB 截断：按字符边界，注明截掉的字节数
+  const big = '汉'.repeat(TOOL_RESULT_MAX_BYTES)
+  const clamped = clampToolText(big)
+  const kept = clamped.slice(0, clamped.indexOf('…[truncated'))
+  check('4h. 超长结果按 UTF-8 字节截断且不拆字符',
+    Buffer.byteLength(kept) <= TOOL_RESULT_MAX_BYTES && kept.isWellFormed() && !kept.includes('\uFFFD')
+    && /…\[truncated \d+ bytes\]$/u.test(clamped), clamped.slice(-30))
+  check('4i. 未超限原样', clampToolText('短结果') === '短结果')
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
