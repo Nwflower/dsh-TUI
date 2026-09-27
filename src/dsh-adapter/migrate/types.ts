@@ -76,7 +76,8 @@ export interface ImportStats {
   badLines: number
   /** Tool results with no matching call, or a second result for one call. */
   droppedToolResults: number
-  /** Harness-injected user rows that were not imported. */
+  /** Rows left out: harness injection in the user role, local-command
+   *  echoes, provider-side tool rows with no harness counterpart. */
   filtered: number
   /** Mid-turn machine context folded into a step's inputs (Claude isMeta, …). */
   meta: number

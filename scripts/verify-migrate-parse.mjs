@@ -508,4 +508,27 @@ const gkParse = (rows, summary = gkSummary()) => parseGrokSession({ summaryJson:
     session.sourceId === 'grok-session-1' && session.cwd === '/w/grok' && gkParse([gkUser('q')], JSON.stringify({ info: null })) === undefined)
 }
 
+{
+  const tr = (id, content, extra = {}) => JSON.stringify({ type: 'tool_result', tool_call_id: id, content, ...extra })
+  const session = gkParse([
+    gkUser('看两张图'),
+    // 真实形态：content 字符串 + 顶层 tool_calls；可以没有正文
+    gkAsst('先读图', { tool_calls: [{ id: 'call-0', name: 'read_file', arguments: '{"target_file":"a.png"}' }, { id: 'call-1', name: 'grep', arguments: '{}' }] }),
+    tr('call-1', '3 matches'),
+    tr('call-0', 'Read image file: a.png', { images: [{ type: 'image', url: 'data:image/png;base64,AAAA' }] }),
+    tr('call-x', '孤儿'),
+    gkAsst('', { tool_calls: [{ id: 'call-2', name: 'edit', arguments: '{}' }] }),
+    JSON.stringify({ type: 'backend_tool_call', kind: { tool_type: 'web_search' } }),
+    gkAsst('改好了'),
+  ])
+  const [s1, s2] = session.turns[0].steps
+  check('8d. 顶层 tool_calls 成为该步的 tool-call 块；只有调用没有正文的行也成步',
+    s1.blocks.map(b => b.type === 'tool-call' ? b.id : b.type).join(',') === 'text,call-0,call-1'
+    && s2.blocks.map(b => b.type).join(',') === 'tool-call' && session.turns[0].steps.length === 3)
+  check('8e. tool_result 按 tool_call_id 配对、按调用顺序；图片换占位，不写 base64',
+    s1.results.map(r => r.text).join(' / ') === 'Read image file: a.png\n[image] / 3 matches' && !JSON.stringify(session).includes('base64'))
+  check('8f. 孤儿结果计入 droppedToolResults；backend_tool_call 计入 filtered',
+    session.stats.droppedToolResults === 1 && session.stats.filtered === 1 && s2.results[0].text === '')
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)

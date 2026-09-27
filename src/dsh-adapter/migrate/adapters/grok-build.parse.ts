@@ -8,11 +8,17 @@
  * row precedes the assistant row it explains. Rows carry no per-row
  * timestamp. The legacy v0 shape (`{role, content}`) is accepted alongside.
  *
+ * Tool traffic: an assistant row lists its calls in a top-level `tool_calls`
+ * array (`{ id, name, arguments }`); each result is a `tool_result` row
+ * naming `tool_call_id`, with optional `images` (replaced by placeholders).
+ * `backend_tool_call` rows are provider-side tools (web search) the model
+ * never called through the harness; they are counted, not imported.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/grok-build.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
 import { emptyStats } from '../parse/role-turns.js'
-import { newStep } from '../parse/tools.js'
+import { CallIndex, IMAGE_PLACEHOLDER, closeToolPairs, newStep } from '../parse/tools.js'
 import type { ImportTurn, MigrationSession } from '../types.js'
 
 /** One session directory's two files, as text. */
@@ -73,6 +79,7 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
   let turns: ImportTurn[] = []
   let current: ImportTurn | undefined
   let pendingReasoning: string[] = []
+  const calls = new CallIndex()
 
   for (const row of records) {
     const kind = row.type === undefined ? row.role : row.type
@@ -86,7 +93,8 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
       turns.push(current)
     } else if (kind === 'assistant') {
       const text = blocksText(row.content)
-      if (text === '' && pendingReasoning.length === 0) continue
+      const toolCalls = Array.isArray(row.tool_calls) ? row.tool_calls.filter(isRecord) : []
+      if (text === '' && pendingReasoning.length === 0 && toolCalls.length === 0) continue
       if (current === undefined) {
         current = { prompt: '', steps: [] }
         turns.push(current)
@@ -96,7 +104,24 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
       for (const reasoning of pendingReasoning) step.blocks.push({ type: 'reasoning', text: reasoning })
       pendingReasoning = []
       if (text !== '') step.blocks.push({ type: 'text', text })
+      for (const call of toolCalls) {
+        if (typeof call.id !== 'string' || call.id === '') continue
+        const name = typeof call.name === 'string' && call.name !== '' ? call.name : 'unknown'
+        const args = typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {})
+        step.blocks.push({ type: 'tool-call', id: call.id, name, arguments: args })
+      }
+      calls.register(step)
       current.steps.push(step)
+    } else if (kind === 'tool_result') {
+      if (typeof row.tool_call_id !== 'string') {
+        calls.orphans += 1
+        continue
+      }
+      const images = Array.isArray(row.images) ? row.images.length : 0
+      const text = [blocksText(row.content), ...Array.from({ length: images }, () => IMAGE_PLACEHOLDER)].filter(part => part !== '').join('\n')
+      calls.attach(row.tool_call_id, text, row.is_error === true)
+    } else if (kind === 'backend_tool_call') {
+      stats.filtered += 1
     } else if (kind === 'reasoning') {
       const text = reasoningText(row)
       if (text !== '') pendingReasoning.push(text)
@@ -104,6 +129,7 @@ export function parseGrokSession(input: GrokSessionInput): MigrationSession | un
   }
 
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
+  stats.droppedToolResults = calls.orphans + closeToolPairs(turns)
   if (!turns.some(turn => turn.prompt !== '')) return undefined
   return { sourceId: id, cwd, ...(title === undefined ? {} : { title }), titleExplicit: false, startedAt, turns, stats }
 }
