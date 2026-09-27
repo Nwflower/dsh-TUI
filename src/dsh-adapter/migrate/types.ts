@@ -106,6 +106,52 @@ export interface MigrationDiscovery {
   readonly sessions: readonly MigrationSession[]
 }
 
+/** Change token of one source artifact: unchanged means reuse its summary. */
+export interface Fingerprint {
+  readonly mtimeMs: number
+  readonly size: number
+}
+
+/** A foreign conversation as listed, derived from the head (and tail) of
+ *  its artifact and stat alone — never from a full parse. */
+export interface ForeignSessionSummary {
+  readonly agentId: string
+  /** Stable source id; always equals the `sourceId` a full parse yields, so
+   *  both import entries land on the same deterministic session id. */
+  readonly sessionKey: string
+  /** Opaque locator of the full content (file path / session directory). */
+  readonly ref: string
+  /** Normalized title; possibly the first-prompt fallback. */
+  readonly title: string
+  /** '' when unknown. */
+  readonly cwd: string
+  /** Sort key: when the conversation last changed. */
+  readonly lastMessageAt: number
+  readonly createdAt: number
+}
+
+/** One scanned artifact: its summary, or null when it is not a conversation
+ *  of its own (sub-agent log, no prompt) — negative results are cached too. */
+export interface ScanEntry {
+  readonly ref: string
+  readonly fp: Fingerprint
+  readonly summary: ForeignSessionSummary | null
+}
+
+export interface ScanOptions {
+  readonly signal?: AbortSignal
+  /** A previous result for an unchanged artifact: a summary, null (known not
+   *  to be a conversation), or undefined (unknown — read it). */
+  cached?(ref: string, fp: Fingerprint): ForeignSessionSummary | null | undefined
+  /** Called per conversation as the scan finds it. */
+  onEntry?(summary: ForeignSessionSummary): void
+}
+
+/** Why a full load produced no session. */
+export interface LoadSkip {
+  readonly skip: 'missing' | 'too-large' | 'not-a-session'
+}
+
 /** A migration adapter for one foreign agent. */
 export interface MigrationAdapter {
   readonly id: string
@@ -118,4 +164,9 @@ export interface MigrationAdapter {
    *  that cannot count by name alone may omit this and fall back to
    *  discover() — the count then equals the parsed session total. */
   count?(): number
+  /** Asynchronous, abortable summary scan for browsing (head/tail reads,
+   *  fingerprint reuse). Sources without it are not browsable. */
+  scan?(options?: ScanOptions): Promise<readonly ScanEntry[]>
+  /** Full parse of one conversation found by scan(). */
+  load?(ref: string): Promise<MigrationSession | LoadSkip>
 }
