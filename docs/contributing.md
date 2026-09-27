@@ -25,7 +25,8 @@
   - 名单只允许提交 PR，不授予 write，也不预审功能范围。
   - 维护者 reopen 一次已关闭的 PR 可作为例外；其他人 reopen 会被再次关闭。
   - base 指向 `main`。保持改动聚焦：一个 PR 只做一个逻辑改动。
-    标题用中文或中英对照，描述写清动机、改动点与验证方式。
+    标题用中文或中英对照，描述按 [PR 模板](../.github/PULL_REQUEST_TEMPLATE.md)
+    写清动机、改动形状与验证方式；Agent 发 PR 使用 `.agents/skills/pr`。
   - **改动代码的 PR 必须关联 issue**：描述里写一行 `Closes #<issue 号>`，
     或用侧边栏 Development 关联。CI 的 `issue-link` 组会检查，没有关联即判失败。
   - CI 判定为纯文档的改动不需要关联（路径分流见“验证”）。

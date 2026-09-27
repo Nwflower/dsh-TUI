@@ -10,6 +10,7 @@
  */
 export {} // 模块边界：避免顶层 await/全局名与其他 verify 脚本冲突
 
+import './lib/default-lang-zh.mjs'
 process.env.FORCE_COLOR = '3'
 
 const [{ PassThrough, Writable }, React, { Terminal: XTerm }, { render }, { Chat }, { QuestionStore }, { settle, settled, sleep }] = await Promise.all([

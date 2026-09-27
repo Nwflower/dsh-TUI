@@ -32,7 +32,9 @@ development contract for humans and coding agents working on `@deepseek-harness-
     Reopening by anyone else is closed again.
   - Open the pull request against `main`. Keep changes focused: one logical
     change per PR, with a Chinese or bilingual title and a description that
-    covers motivation, what changed, and how it was verified.
+    follows the [PR template](../.github/PULL_REQUEST_TEMPLATE.md): motivation,
+    the shape of the change, and how it was verified. Agents open PRs with
+    `.agents/skills/pr`.
   - **A pull request that changes code must link an issue**: add a `Closes #<issue>`
     line to the description, or link it through the Development sidebar. The
     `issue-link` CI group checks this and fails without a link.
@@ -288,8 +290,8 @@ CI separately routes changes using the path allowlist in
   the actual local verification scope.
 
 `verify:build` also checks source hygiene, renderer primitives, theme and
-activity preference migrations, status animations, table layout, and
-side-question behavior.
+activity preference migrations, status animations, table layout, mermaid
+diagrams, and side-question behavior.
 
 - Source hygiene rejects the listed naming and compiled-input regressions.
 - It is not a source-provenance or license audit.
@@ -329,6 +331,9 @@ change, also run the closest focused script:
 | Hover event performance (complete interest boundaries, no-interest rect fast path, frame/multi-root invalidation) | `node --import tsx/esm scripts/verify-hover-coalesce.tsx` |
 | Prompt-input mouse selection editing (drag/Shift+click/double-click word select, delete/replace, layered Esc, Ctrl+C copy, CJK wide cells, fold-side clamping) | `node --import tsx/esm scripts/verify-input-selection.tsx` |
 | Sixel encoding, worker cache, thumbnail/preview lifecycle | `node --import tsx/esm scripts/verify-terminal-images-sixel.tsx`, `node --import tsx/esm scripts/verify-sixel-transcript.tsx`; timing comparison `node --import tsx/esm scripts/bench-sixel-encode.tsx` |
+| Standalone Markdown nodes (tables, mermaid diagrams) and streaming block spacing | `pnpm verify:table-layout`, `pnpm verify:mermaid-diagram`, `node --import tsx/esm scripts/verify-streaming-markdown-spacing.tsx` |
+| Cross-process session mount ledger (failure behavior, strict reads, lock recovery, reservations) | `pnpm verify:session-mounts` |
+| Unsent-draft handoff across screens (snapshot, cursor, image bindings, ownership) | `pnpm verify:composer-draft-handoff`; end-to-end screen switching also `node scripts/verify-session-browser.mjs` |
 
 Most focused scripts invoked with plain `node` import `lib/types/`; run
 `pnpm build` first. Scripts that import TypeScript sources declare the

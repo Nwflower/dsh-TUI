@@ -23,8 +23,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // Point DATA_DIR at a temp home BEFORE importing the module (paths.ts reads
-// homedir at import time).
-const tmpHome = mkdtempSync(join(tmpdir(), 'dsh-inject-'))
+// homedir at import time). Outside Windows the home sits under /tmp: macOS's
+// per-user tmpdir (/var/folders/…/T/) alone pushes the socket path past the
+// 104-byte sun_path limit, so bind() fails with EINVAL on every Mac.
+const tmpHome = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'dsh-inject-'))
 process.env.HOME = tmpHome
 process.env.USERPROFILE = tmpHome
 
