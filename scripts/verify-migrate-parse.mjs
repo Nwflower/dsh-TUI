@@ -351,4 +351,19 @@ const cxParse = rows => parseCodexRollout({ raw: rows.join('\n'), sourceId: 'rol
     session.cwd === '/w/codex' && cxParse([cxUser('q'), cxAsst('a')]) === undefined)
 }
 
+{
+  // 注入块：AGENTS.md 说明与 <environment_context> 同在首条 user 消息里（真实 rollout 的开头形态）
+  const session = cxParse([
+    cxMeta(),
+    cxUser('# AGENTS.md instructions for /w/codex\n\n<INSTRUCTIONS>规则</INSTRUCTIONS>', '<environment_context>\n  <cwd>/w/codex</cwd>\n</environment_context>'),
+    cxUser('<user_instructions>自定义说明</user_instructions>', '  真正的\n第一问  '),
+    cxItem({ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,AAAA' }, { type: 'input_text', text: '看图' }] }),
+    cxAsst('答'),
+  ])
+  check('7d. 纯注入的 user 消息不开轮；混合消息只留人类文本',
+    session.turns.map(t => t.prompt).join('|') === '真正的\n第一问|[image]\n\n看图', JSON.stringify(session.turns.map(t => t.prompt)))
+  check('7e. 丢弃的注入块计入 filtered', session.stats.filtered === 3, String(session.stats.filtered))
+  check('7f. 标题兜底首个真实提问（归一空白），不算显式', session.title === '真正的 第一问' && session.titleExplicit === false)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)

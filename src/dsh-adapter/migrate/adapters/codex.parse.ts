@@ -7,11 +7,19 @@
  * rows are the model-visible history (OpenAI Responses items); `event_msg`
  * rows are UI housekeeping that repeats response items and is skipped.
  *
+ * Codex writes its harness context as user-role blocks: `<environment_context>`,
+ * `<user_instructions>` and other `<…>` blocks, and the
+ * `# AGENTS.md instructions` block that opens most rollouts. Those blocks are
+ * dropped; a user message made only of them opens no turn and never titles
+ * the session.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/codex.parse
  */
 import { isRecord, parseJsonl, type JsonRecord } from '../parse/jsonl.js'
+import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { emptyStats } from '../parse/role-turns.js'
-import { newStep } from '../parse/tools.js'
+import { normalizeTitle } from '../parse/title.js'
+import { IMAGE_PLACEHOLDER, newStep } from '../parse/tools.js'
 import type { ImportStep, ImportTurn, MigrationSession } from '../types.js'
 
 /** What the adapter knows about a rollout besides its text. */
@@ -33,6 +41,24 @@ function blocksText(content: unknown, want: string): string {
     if (isRecord(block) && block.type === want && typeof block.text === 'string' && block.text !== '') parts.push(block.text)
   }
   return parts.join('\n\n')
+}
+
+/** The human part of a user message: harness blocks dropped, images kept as
+ *  placeholders. Returns the text and how many blocks were dropped. */
+function userPrompt(content: unknown): { text: string, dropped: number } {
+  if (!Array.isArray(content)) return { text: '', dropped: 0 }
+  const parts: string[] = []
+  let dropped = 0
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    if (block.type === 'input_image') {
+      parts.push(IMAGE_PLACEHOLDER)
+    } else if (block.type === 'input_text' && typeof block.text === 'string' && block.text.trim() !== '') {
+      if (block.text.trimStart().startsWith('<') || isInjectedText(block.text)) dropped += 1
+      else parts.push(block.text)
+    }
+  }
+  return { text: parts.join('\n\n').trim(), dropped }
 }
 
 /**
@@ -60,7 +86,8 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
 
   const acceptMessage = (payload: JsonRecord): void => {
     if (payload.role === 'user') {
-      const prompt = blocksText(payload.content, 'input_text')
+      const { text: prompt, dropped } = userPrompt(payload.content)
+      stats.filtered += dropped
       if (prompt === '') return
       current = { prompt, steps: [] }
       turns.push(current)
@@ -92,5 +119,8 @@ export function parseCodexRollout(input: CodexRolloutInput): MigrationSession | 
 
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
   if (cwd === undefined || !turns.some(turn => turn.prompt !== '')) return undefined
-  return { sourceId: input.sourceId, cwd, titleExplicit: false, startedAt, turns, stats }
+  // Codex keeps no title of its own: the first real prompt is the fallback.
+  const firstPrompt = turns.find(turn => turn.prompt !== '')?.prompt
+  const title = normalizeTitle(firstPrompt === undefined ? undefined : unwrapUserText(firstPrompt))
+  return { sourceId: input.sourceId, cwd, ...(title === '' ? {} : { title }), titleExplicit: false, startedAt, turns, stats }
 }
