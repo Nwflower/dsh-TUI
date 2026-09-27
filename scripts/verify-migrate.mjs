@@ -613,6 +613,16 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:00:01Z', cwd: '/tmp/cc', message: { role: 'assistant', model: 'claude-sonnet-5', content: [{ type: 'text', text: '带思考的答复' }, { type: 'thinking', thinking: '思考内容' }] } }),
     '',
   ].join('\n'))
+  // 同一会话的子代理 transcript（<session>/subagents/）与辅助 transcript：都不是独立会话
+  const ccSub = join(ccDir, firstUuid(), 'subagents')
+  mkdirSync(ccSub, { recursive: true })
+  const auxLines = [
+    JSON.stringify({ type: 'user', sessionId: firstUuid(), cwd: '/tmp/cc', message: { role: 'user', content: '子代理任务' } }),
+    JSON.stringify({ type: 'assistant', sessionId: firstUuid(), cwd: '/tmp/cc', message: { id: 'ms', role: 'assistant', content: [{ type: 'text', text: '子代理回答' }] } }),
+    '',
+  ].join('\n')
+  writeFileSync(join(ccSub, 'agent-a1.jsonl'), auxLines)
+  writeFileSync(join(ccDir, 'agent-aux.jsonl'), auxLines)
   // codex：turn_context 带 model + assistant 输出
   const codexDay = join(home, '.codex', 'sessions', '2026', '01', '01')
   mkdirSync(codexDay, { recursive: true })
@@ -692,6 +702,8 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     cc.sessions.length === 1 && cc.sessions[0].turns.length === 1 && cc.sessions[0].turns[0].prompt === '纯文本提问'
     && blockText(ccStep, 'reasoning') === '思考内容' && ccStep?.model === 'claude-sonnet-5'
     && cc.sessions[0].cwd === '/tmp/cc')
+  check('6a2. claude-code 的 subagents/ 与辅助 transcript 不成会话，也不计入 count',
+    cc.sessions.length === 1 && claudeCodeAdapter.count() === 2, `count=${claudeCodeAdapter.count()}`)
   const codexFound = codexAdapter.discover()
   const codexStep = stepOf(codexFound.sessions[0])
   check('6b. codex 解析（turn_context model 前向）',

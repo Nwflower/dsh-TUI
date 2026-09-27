@@ -321,4 +321,7 @@ const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem
     titleOf([]) === '第一个真实 提问|false', titleOf([]))
 }
 
+check('6t. 记录 sessionId 与文件名不符的辅助 transcript 不成会话',
+  parseClaudeTranscript({ raw: [ccUser('子任务'), ccAsst('m', 'x')].join('\n'), fileStem: 'agent-a1', fallbackCwd: '/f' }) === undefined)
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)

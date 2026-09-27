@@ -12,6 +12,10 @@ import type { MigrationAdapter, MigrationDiscovery, MigrationSession } from '../
 import { parseClaudeTranscript } from './claude-code.parse.js'
 import { countEntries } from './scan.js'
 
+/** Sub-agent transcripts (`<session>/subagents/*.jsonl`) belong to their
+ *  parent session; they are never conversations of their own. */
+const SUBAGENT_DIR = 'subagents'
+
 function readOne(path: string, fallbackCwd: string): MigrationSession | undefined {
   let raw: string
   try {
@@ -42,8 +46,9 @@ export const claudeCodeAdapter: MigrationAdapter = {
       }
       for (const entry of entries) {
         const path = join(dir, entry.name)
-        if (entry.isDirectory()) walk(path, depth + 1, unmunge(entry.name) ?? fallbackCwd)
-        else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        if (entry.isDirectory()) {
+          if (entry.name !== SUBAGENT_DIR) walk(path, depth + 1, unmunge(entry.name) ?? fallbackCwd)
+        } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
           try {
             if (statSync(path).size > 64 * 1024 * 1024) continue
           } catch {
@@ -58,7 +63,7 @@ export const claudeCodeAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.jsonl') })
+    return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR] })
   },
 }
 

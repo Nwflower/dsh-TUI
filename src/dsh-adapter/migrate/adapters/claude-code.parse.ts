@@ -135,10 +135,14 @@ function isToolResultLine(content: unknown): boolean {
 
 /**
  * Parse one Claude Code transcript.
- * @returns The session, or undefined when it holds no human prompt.
+ * @returns The session, or undefined when it holds no human prompt or is an
+ *   auxiliary transcript (its records name another session: only the main
+ *   `<sessionId>.jsonl` is a conversation of its own).
  */
 export function parseClaudeTranscript(input: ClaudeTranscriptInput): MigrationSession | undefined {
   const { records, badLines } = parseJsonl(input.raw)
+  const owner = records.find(record => typeof record.sessionId === 'string' && record.sessionId !== '')?.sessionId
+  if (owner !== undefined && owner !== input.fileStem) return undefined
   const stats = { ...emptyStats(), badLines }
   let turns: ImportTurn[] = []
   let current: ImportTurn | undefined
