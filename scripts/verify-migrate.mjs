@@ -300,6 +300,11 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   check("4c'3. assistant 内容携带 tool-call 块（wire 的 tool_calls 由它派生）",
     assistant.data.message.content.filter(b => b.type === 'tool-call').map(b => b.id).join(',') === 'call_a,call_b')
 
+  const abortedSession = { ...toolSession, turns: [{ prompt: '做到一半', steps: [], aborted: true }, { prompt: '接着', steps: [] }] }
+  const ends = sessionize(id, 'fixture', abortedSession).events.filter(e => e.type === 'turn/end').map(e => e.data.reason)
+  check("4c'5. 源标记中断的轮以 aborted(legacy) 收尾，其余 completed",
+    ends[0]?.kind === 'aborted' && ends[0]?.reason?.kind === 'legacy' && ends[1]?.kind === 'completed', JSON.stringify(ends))
+
   const rootTools = mkdtempSync(join(tmpdir(), 'verify-migrate-tools-'))
   const run = await importSessions(fakeAdapter, rootTools, [toolSession])
   const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')

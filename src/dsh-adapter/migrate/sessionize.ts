@@ -168,7 +168,13 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
       writeTools(turnIndex, step, imported)
       events.push(model.append('step/end', { turn: turnIndex, step }))
     }
-    events.push(model.append('turn/end', { turn: turnIndex, reason: { kind: 'completed' } }))
+    // A source-recorded interruption keeps its meaning. Sources record it
+    // coarsely (no user/hook/dispose distinction), which is exactly what the
+    // `legacy` cancel cause exists for.
+    events.push(model.append('turn/end', {
+      turn: turnIndex,
+      reason: turn.aborted === true ? { kind: 'aborted', reason: { kind: 'legacy' } } : { kind: 'completed' },
+    }))
   }
   return { header: model.header, events }
 }
