@@ -32,6 +32,10 @@
  * the imported history, where adapters that only lift a LEADING system
  * message (pi-ai) send it as one more user message.
  *
+ * Title: only a title the SOURCE owns (`titleExplicit`) is written, as one
+ * trailing `session/title` — a first-prompt fallback is left out so DSH
+ * derives it from the first user message exactly as for a native session.
+ *
  * @module @deepseek-harness-tui/dsh-tui/migrate/sessionize
  */
 import {
@@ -50,6 +54,8 @@ import {
   type SessionEvent,
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
+import { userTitleData } from '../compat/sessionLog.js'
+import { normalizeTitle } from './parse/title.js'
 import type { ImportStep, MigrationSession } from './types.js'
 
 /** One migration turn's model-visible outcome, ready for persistence. */
@@ -176,5 +182,7 @@ export function sessionize(id: SessionId, agentId: string, session: MigrationSes
       reason: turn.aborted === true ? { kind: 'aborted', reason: { kind: 'legacy' } } : { kind: 'completed' },
     }))
   }
+  const title = session.titleExplicit ? normalizeTitle(session.title) : ''
+  if (title !== '') events.push(model.append('session/title', userTitleData(title)))
   return { header: model.header, events }
 }

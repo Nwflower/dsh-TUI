@@ -305,8 +305,16 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   check("4c'5. 源标记中断的轮以 aborted(legacy) 收尾，其余 completed",
     ends[0]?.kind === 'aborted' && ends[0]?.reason?.kind === 'legacy' && ends[1]?.kind === 'completed', JSON.stringify(ends))
 
+  const titled = { ...toolSession, sourceId: 'titled', title: '  源自带的\n标题  ', titleExplicit: true }
+  const titledEvents = sessionize(SessionId(migrationUuid('fixture:titled')), 'fixture', titled).events
+  const last = titledEvents.at(-1)
+  check("4c'6. 显式标题归一后作为末尾 session/title 写入",
+    last?.type === 'session/title' && last.data.title === '源自带的 标题' && last.data.source?.kind === 'user', JSON.stringify(last?.data))
+  check("4c'7. 首问兜底的标题不写 session/title（留给 DSH 自己回退）",
+    !sessionize(id, 'fixture', { ...toolSession, title: '兜底', titleExplicit: false }).events.some(e => e.type === 'session/title'))
+
   const rootTools = mkdtempSync(join(tmpdir(), 'verify-migrate-tools-'))
-  const run = await importSessions(fakeAdapter, rootTools, [toolSession])
+  const run = await importSessions(fakeAdapter, rootTools, [toolSession, titled])
   const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')
   const { Context } = await import('@deepseek-ai/cordis')
   const ctxT = new Context()
@@ -326,8 +334,12 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     const answered = msgs.slice(i + 1, i + 1 + ids.length)
     if (answered.length !== ids.length || answered.some((m, k) => m.role !== 'tool' || m.toolCallId !== ids[k])) legal = false
   }
+  const th = await ctxT.get('sessionPersistence').open(migrationSessionId(fakeAdapter, titled), 'read')
+  const titleRead = (await th.read()).events.filter(e => e.type === 'session/title').map(e => e.data.title)
+  await th.close()
+  check("4c'8. 带标题的会话经官方读取链可读回标题", titleRead.join('|') === '源自带的 标题', titleRead.join('|'))
   check("4c'4. 落盘读回后 wire 合法（每个 tool_call 紧跟其 tool 消息）",
-    run.imported === 1 && legal && msgs.map(m => m.role).join(',') === 'user,assistant,tool,tool,user,assistant',
+    run.imported === 2 && legal && msgs.map(m => m.role).join(',') === 'user,assistant,tool,tool,user,assistant',
     msgs.map(m => m.role).join(','))
   await Promise.resolve(fiberT.dispose()).catch(() => {})
   rmSync(rootTools, { recursive: true, force: true })
