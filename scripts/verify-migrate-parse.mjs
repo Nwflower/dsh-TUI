@@ -84,4 +84,17 @@ function check(name, ok, extra = '') {
   check('2l. 敌意输入（2 万个未闭合开标签）线性完成', elapsed < 500, `${elapsed.toFixed(1)}ms`)
 }
 
+// ── 3. 标题归一 ─────────────────────────────────────────────────────────
+{
+  const { normalizeTitle, TITLE_MAX_CHARS } = await import('../src/dsh-adapter/migrate/parse/title.js')
+  check('3a. 折叠空白为单行', normalizeTitle('  修复\n\n构建\t脚本  ') === '修复 构建 脚本')
+  check('3b. 空白与 undefined → 空串', normalizeTitle(' \n ') === '' && normalizeTitle(undefined) === '')
+  const long = '题'.repeat(TITLE_MAX_CHARS + 5)
+  const cut = normalizeTitle(long)
+  check('3c. 超长截断到上限并以 … 结尾', Array.from(cut).length === TITLE_MAX_CHARS && cut.endsWith('…'), cut)
+  check('3d. 恰好上限不截断', normalizeTitle('字'.repeat(TITLE_MAX_CHARS)) === '字'.repeat(TITLE_MAX_CHARS))
+  const emoji = normalizeTitle('🎏'.repeat(TITLE_MAX_CHARS + 1))
+  check('3e. 按码点截断，不拆代理对', emoji.isWellFormed() && Array.from(emoji).length === TITLE_MAX_CHARS)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
