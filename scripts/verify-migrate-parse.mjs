@@ -173,4 +173,35 @@ function check(name, ok, extra = '') {
   check('5c. messageCount 与角色列表长度一致', messageCount({ turns }) === list.length, String(messageCount({ turns })))
 }
 
+// ── 6. claude-code ──────────────────────────────────────────────────────
+const { parseClaudeTranscript } = await import('../src/dsh-adapter/migrate/adapters/claude-code.parse.js')
+const SID = '77777777-7777-4777-8777-777777777777'
+/** Claude Code 行：公共字段 + 覆盖项。 */
+const ccLine = (type, message, extra = {}) =>
+  JSON.stringify({ type, sessionId: SID, cwd: '/w/cc', timestamp: '2026-09-01T00:00:00Z', message, ...extra })
+const ccUser = (content, extra) => ccLine('user', { role: 'user', content }, extra)
+const ccAsst = (id, content, extra) => ccLine('assistant', { id, role: 'assistant', model: 'claude-x', content }, extra)
+const ccParse = lines => parseClaudeTranscript({ raw: lines.join('\n'), fileStem: SID, fallbackCwd: '/fallback' })
+{
+  const session = ccParse([
+    ccUser('第一问<system-reminder>机器提醒</system-reminder>'),
+    // 同一次响应拆成三行（thinking / text / 仅 tool_use），合并为一步
+    ccAsst('msg_1', [{ type: 'thinking', thinking: '想一想' }]),
+    ccAsst('msg_1', [{ type: 'text', text: '回答' }]),
+    ccAsst('msg_2', [{ type: 'text', text: '第二次调用' }]),
+    ccUser([{ type: 'text', text: '第二问' }]),
+    ccAsst('msg_3', 'plain string content'),
+    ccLine('assistant', null),
+    '{broken',
+  ])
+  const [t1, t2] = session.turns
+  check('6a. 同一 message.id 的多行合并为一步，不同 id 各为一步',
+    t1.steps.length === 2 && JSON.stringify(t1.steps[0].blocks) === JSON.stringify([{ type: 'reasoning', text: '想一想' }, { type: 'text', text: '回答' }]))
+  check('6b. 提问剥掉行内 system-reminder；数组形态的提问同样开轮',
+    t1.prompt === '第一问' && t2.prompt === '第二问' && t2.steps[0].blocks[0].text === 'plain string content')
+  check('6c. 每步记录 message.model；cwd 取行上字段；坏行计数',
+    t1.steps[0].model === 'claude-x' && session.cwd === '/w/cc' && session.stats.badLines === 1 && session.sourceId === SID)
+  check('6d. 没有任何人类提问的 transcript 不成会话', ccParse([ccAsst('m', [{ type: 'text', text: '独白' }])]) === undefined)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
