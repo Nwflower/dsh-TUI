@@ -9,8 +9,10 @@
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/zcode.parse
  */
+import { isInjectedText, unwrapUserText } from '../parse/injection.js'
 import { isRecord } from '../parse/jsonl.js'
 import { emptyStats } from '../parse/role-turns.js'
+import { normalizeTitle } from '../parse/title.js'
 import { newStep } from '../parse/tools.js'
 import type { ImportTurn, MigrationSession } from '../types.js'
 
@@ -41,7 +43,15 @@ export function parseZcodeSession(raw: string): MigrationSession | undefined {
     if (typeof message.content !== 'string' || message.content === '') continue
     if (firstTime === 0 && typeof message.timestamp === 'number') firstTime = message.timestamp
     if (message.role === 'user') {
-      current = { prompt: message.content, steps: [] }
+      // Shared injection rules: harness blocks open no turn, wrappers keep
+      // only the human words.
+      if (isInjectedText(message.content)) {
+        stats.filtered += 1
+        continue
+      }
+      const prompt = unwrapUserText(message.content)
+      if (prompt === '') continue
+      current = { prompt, steps: [] }
       turns.push(current)
       continue
     }
@@ -55,11 +65,15 @@ export function parseZcodeSession(raw: string): MigrationSession | undefined {
   }
   turns = turns.filter(turn => turn.prompt !== '' || turn.steps.length > 0)
   if (turns.length === 0) return undefined
+  // meta.title is the store's own title (written to the log); the first real
+  // prompt is only a fallback.
+  const ownTitle = normalizeTitle(typeof title === 'string' ? title : undefined)
+  const shownTitle = ownTitle !== '' ? ownTitle : normalizeTitle(turns.find(turn => turn.prompt !== '')?.prompt)
   return {
     sourceId: taskId,
     cwd: workspacePath,
-    ...(typeof title === 'string' && title !== '' ? { title } : {}),
-    titleExplicit: false,
+    ...(shownTitle === '' ? {} : { title: shownTitle }),
+    titleExplicit: ownTitle !== '',
     startedAt: typeof createdAt === 'number' ? createdAt : firstTime,
     turns,
     stats,

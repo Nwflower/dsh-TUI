@@ -599,4 +599,18 @@ const zcDoc = (messages, meta = {}) => JSON.stringify({
     && parseZcodeSession('null') === undefined && parseZcodeSession('{broken') === undefined)
 }
 
+{
+  const session = parseZcodeSession(zcDoc([
+    { role: 'user', content: '<environment_context>\n<cwd>/w/zc</cwd>\n</environment_context>' },
+    { role: 'user', content: '<user_query>真正的问题</user_query>' },
+    { role: 'assistant', content: '答' },
+  ], { title: '  zcode\n自带标题 ' }))
+  check('9c. 共享注入规则：注入块不开轮并计数，包装只留正文',
+    session.turns.map(t => t.prompt).join('|') === '真正的问题' && session.stats.filtered === 1)
+  check('9d. meta.title 归一后为显式标题；缺失时兜底首个真实提问（不算显式）',
+    session.title === 'zcode 自带标题' && session.titleExplicit === true
+    && parseZcodeSession(zcDoc([{ role: 'user', content: '兜底问' }], { title: '' })).title === '兜底问'
+    && parseZcodeSession(zcDoc([{ role: 'user', content: '兜底问' }], { title: '' })).titleExplicit === false)
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
