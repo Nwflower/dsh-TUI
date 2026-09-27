@@ -11,6 +11,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { MigrationAdapter, MigrationDiscovery, MigrationSession, MigrationTurn } from '../types.js'
+import { emptyStats, fromRoleTurns } from '../parse/role-turns.js'
 import { countEntries } from './scan.js'
 
 interface CodeBlock { readonly type?: unknown, readonly text?: unknown, readonly thinking?: unknown }
@@ -126,7 +127,7 @@ function readOne(path: string, fallbackCwd: string): MigrationSession | undefine
   const userTurns = turns.filter(turn => turn.role === 'user')
   if (userTurns.length === 0) return undefined
   turns = turns.filter(turn => turn.role === 'user' || turn.text !== '' || turn.reasoning !== undefined)
-  return { sourceId, cwd, startedAt: startedAt || turns[0]!.time, turns }
+  return { sourceId, cwd, titleExplicit: false, startedAt: startedAt || turns[0]!.time, turns: fromRoleTurns(turns), stats: emptyStats() }
 }
 
 export const claudeCodeAdapter: MigrationAdapter = {

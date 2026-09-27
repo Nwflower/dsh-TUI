@@ -9,7 +9,11 @@
  * @module @deepseek-harness-tui/dsh-tui/migrate/types
  */
 
-/** One conversational turn in a foreign conversation, normalized. */
+/**
+ * One message of a foreign conversation as a flat role list — the shape the
+ * omp adapter still produces; {@link fromRoleTurns} in parse/role-turns.ts
+ * folds it into {@link ImportTurn}s.
+ */
 export interface MigrationTurn {
   readonly role: 'user' | 'assistant'
   readonly text: string
@@ -84,10 +88,14 @@ export interface MigrationSession {
   readonly sourceId: string
   /** Source working directory, when recorded; falls back to the scan root. */
   readonly cwd: string
-  /** Conversation title, when the source derived one. */
+  /** Conversation title, when the source has one (possibly a first-prompt fallback). */
   readonly title?: string
+  /** Whether {@link title} is the source's own title (written to the log as
+   *  `session/title`) rather than a first-prompt fallback (left for DSH to derive). */
+  readonly titleExplicit: boolean
   readonly startedAt: number
-  readonly turns: readonly MigrationTurn[]
+  readonly turns: readonly ImportTurn[]
+  readonly stats: ImportStats
 }
 
 /** What one adapter found on disk. */

@@ -30,6 +30,7 @@ const { Session, SessionId, SessionLogOffset, SESSION_FORMAT_VERSION } = await i
 const { importSessions, migrationSessionId } = await import('../src/dsh-adapter/migrate/index.js')
 const { sessionize } = await import('../src/dsh-adapter/migrate/sessionize.js')
 const { migrationUuid } = await import('../src/dsh-adapter/migrate/uuid.js')
+const { fromRoleTurns, emptyStats } = await import('../src/dsh-adapter/migrate/parse/role-turns.js')
 const { claudeCodeAdapter } = await import('../src/dsh-adapter/migrate/adapters/claude-code.js')
 const { codexAdapter } = await import('../src/dsh-adapter/migrate/adapters/codex.js')
 const { ompAdapter } = await import('../src/dsh-adapter/migrate/adapters/omp.js')
@@ -43,8 +44,17 @@ function check(name, ok, extra = '') {
   if (!ok) process.exitCode = 1
 }
 
-/** Fixture：CJK + emoji + reasoning 的多形状会话。 */
+/** Fixture：CJK + emoji + reasoning 的多形状会话（按角色列表书写，经 fromRoleTurns 折成轮）。 */
 function fixtureSessions() {
+  return roleFixtures().map(session => ({
+    ...session,
+    titleExplicit: false,
+    turns: fromRoleTurns(session.turns),
+    stats: emptyStats(),
+  }))
+}
+
+function roleFixtures() {
   return [
     {
       sourceId: '11111111-1111-4111-8111-111111111111',
@@ -496,31 +506,34 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   process.env.HOME = home
   process.env.USERPROFILE = home
   process.env.GROK_HOME = join(home, '.grok')
+  // 断言读轮模型：一轮 = 一个提问 + 若干步；reasoning 是步内的 reasoning 块
+  const stepOf = session => session?.turns[0]?.steps[0]
+  const blockText = (step, type) => step?.blocks.find(block => block.type === type)?.text
   const cc = claudeCodeAdapter.discover()
-  const ccTurns = cc.sessions[0]?.turns ?? []
+  const ccStep = stepOf(cc.sessions[0])
   check('6a. claude-code 解析（字符串 user + thinking + model）',
-    cc.sessions.length === 1 && ccTurns.length === 2
-    && ccTurns[1].reasoning === '思考内容' && ccTurns[1].model === 'claude-sonnet-5'
+    cc.sessions.length === 1 && cc.sessions[0].turns.length === 1 && cc.sessions[0].turns[0].prompt === '纯文本提问'
+    && blockText(ccStep, 'reasoning') === '思考内容' && ccStep?.model === 'claude-sonnet-5'
     && cc.sessions[0].cwd === '/tmp/cc')
   const codexFound = codexAdapter.discover()
-  const codexTurns = codexFound.sessions[0]?.turns ?? []
+  const codexStep = stepOf(codexFound.sessions[0])
   check('6b. codex 解析（turn_context model 前向）',
-    codexFound.sessions.length === 1 && codexTurns.length === 2
-    && codexTurns[1].model === 'gpt-5.1' && codexFound.sessions[0].cwd === '/tmp/codex')
+    codexFound.sessions.length === 1 && codexFound.sessions[0].turns.length === 1
+    && codexStep?.model === 'gpt-5.1' && blockText(codexStep, 'text') === 'codex 答复'
+    && codexFound.sessions[0].cwd === '/tmp/codex')
   const ompFound = ompAdapter.discover()
-  const ompTurns = ompFound.sessions[0]?.turns ?? []
+  const ompStep = stepOf(ompFound.sessions[0])
   check('6c. omp 解析（thinking 块）',
-    ompFound.sessions.length === 1 && ompTurns.length === 2 && ompTurns[1].reasoning === 'omp 思考')
+    ompFound.sessions.length === 1 && ompFound.sessions[0].turns.length === 1 && blockText(ompStep, 'reasoning') === 'omp 思考')
   const zcFound = zcodeAdapter.discover()
-  const zcTurns = zcFound.sessions[0]?.turns ?? []
   check('6d. zcode 解析（单对象 + 元素级 null 跳过）',
-    zcFound.sessions.length === 1 && zcTurns.length === 2
+    zcFound.sessions.length === 1 && zcFound.sessions[0].turns.length === 1 && zcFound.sessions[0].turns[0].steps.length === 1
     && zcFound.sessions[0].cwd === '/tmp/zc' && zcFound.sessions[0].title === 'zcode 会话标题')
   const gbFound = grokBuildAdapter.discover()
-  const gbTurns = gbFound.sessions[0]?.turns ?? []
+  const gbStep = stepOf(gbFound.sessions[0])
   check('6e. grok-build 解析（reasoning 兄弟行 + synthetic 过滤）',
-    gbFound.sessions.length === 1 && gbTurns.length === 2
-    && gbTurns[1].reasoning === 'grok 思考' && gbTurns[1].model === 'grok-4-fast'
+    gbFound.sessions.length === 1 && gbFound.sessions[0].turns.length === 1
+    && blockText(gbStep, 'reasoning') === 'grok 思考' && gbStep?.model === 'grok-4-fast'
     && gbFound.sessions[0].cwd === '/tmp/grok')
   // sourceId 是幂等键的一部分（UUIDv5 输入）：它必须是裸文件名，不能把源目录
   // 带进来——join() 在 Windows 产出 `\`，旧实现的 split('/') 会退化成整条绝对

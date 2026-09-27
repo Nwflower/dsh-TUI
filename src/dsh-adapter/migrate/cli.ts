@@ -19,6 +19,7 @@
  * @module @deepseek-harness-tui/dsh-tui/migrate/cli
  */
 import { cleanRenderText } from '../sanitize.js'
+import { messageCount } from './parse/role-turns.js'
 import { MIGRATION_ADAPTERS, defaultSessionRoot, importSessions } from './index.js'
 
 /** Exit code for "nothing to do / unknown agent". */
@@ -87,7 +88,7 @@ async function cliMigrateInner(argv: readonly string[]): Promise<number> {
   if (dryRun) {
     console.log(`[${agent.id}] ${found.sessions.length} conversation(s) would be imported into ${defaultSessionRoot()} (dry run)`)
     for (const session of found.sessions.slice(0, 5)) {
-      console.log(`  · ${safe(session.sourceId)}  (${session.turns.length} messages · cwd ${safe(session.cwd)})`)
+      console.log(`  · ${safe(session.sourceId)}  (${messageCount(session)} messages · cwd ${safe(session.cwd)})`)
     }
     if (found.sessions.length > 5) console.log(`  … and ${found.sessions.length - 5} more`)
     return 0

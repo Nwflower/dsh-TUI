@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { MigrationAdapter, MigrationDiscovery, MigrationSession, MigrationTurn } from '../types.js'
+import { emptyStats, fromRoleTurns } from '../parse/role-turns.js'
 import { countEntries } from './scan.js'
 
 interface TextPart { readonly type?: unknown, readonly text?: unknown }
@@ -112,7 +113,7 @@ function readOne(dir: string): MigrationSession | undefined {
     }
   }
   if (turns.length === 0) return undefined
-  return { sourceId: info.id, cwd: info.cwd, title, startedAt: startedAt || turns[0]!.time, turns }
+  return { sourceId: info.id, cwd: info.cwd, title, titleExplicit: false, startedAt: startedAt || turns[0]!.time, turns: fromRoleTurns(turns), stats: emptyStats() }
 }
 
 export const grokBuildAdapter: MigrationAdapter = {

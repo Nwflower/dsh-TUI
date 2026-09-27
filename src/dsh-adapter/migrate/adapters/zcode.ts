@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { MigrationAdapter, MigrationDiscovery, MigrationSession, MigrationTurn } from '../types.js'
+import { emptyStats, fromRoleTurns } from '../parse/role-turns.js'
 import { countEntries } from './scan.js'
 
 interface ZcodeMessage { readonly role?: unknown, readonly content?: unknown, readonly timestamp?: unknown }
@@ -52,8 +53,10 @@ function readOne(path: string): MigrationSession | undefined {
     sourceId: taskId,
     cwd,
     title: typeof title === 'string' && title !== '' ? title : undefined,
+    titleExplicit: false,
     startedAt: typeof createdAt === 'number' ? createdAt : turns[0]!.time,
-    turns,
+    turns: fromRoleTurns(turns),
+    stats: emptyStats(),
   }
 }
 

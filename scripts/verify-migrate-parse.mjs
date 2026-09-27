@@ -153,4 +153,24 @@ function check(name, ok, extra = '') {
   check('4i. 未超限原样', clampToolText('短结果') === '短结果')
 }
 
+// ── 5. 角色列表折叠（旧形态机械适配）──────────────────────────────────────
+{
+  const { fromRoleTurns, messageCount } = await import('../src/dsh-adapter/migrate/parse/role-turns.js')
+  const list = [
+    { role: 'assistant', text: '孤立开场白', time: 0 },
+    { role: 'user', text: '问一', time: 0 },
+    { role: 'assistant', text: '答一', reasoning: '想一', model: 'm', time: 0 },
+    { role: 'assistant', text: '', reasoning: '只有思考', time: 0 },
+    { role: 'user', text: '尾问', time: 0 },
+  ]
+  const turns = fromRoleTurns(list)
+  check('5a. 开头的 assistant 开无提问轮，user 开新轮，尾问成无步轮',
+    turns.length === 3 && turns[0].prompt === '' && turns[0].steps.length === 1
+    && turns[1].prompt === '问一' && turns[1].steps.length === 2 && turns[2].steps.length === 0)
+  check('5b. 步内 reasoning 先于正文，model 落到步上',
+    JSON.stringify(turns[1].steps[0].blocks) === JSON.stringify([{ type: 'reasoning', text: '想一' }, { type: 'text', text: '答一' }])
+    && turns[1].steps[0].model === 'm' && turns[1].steps[1].blocks.length === 1)
+  check('5c. messageCount 与角色列表长度一致', messageCount({ turns }) === list.length, String(messageCount({ turns })))
+}
+
 console.log(process.exitCode ? `${checks} check(s), FAILED` : `migrate parse regression passed (${checks} checks)`)
