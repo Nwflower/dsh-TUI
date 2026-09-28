@@ -15,6 +15,13 @@ const bundledPackages = [
   'presentation',
   'storage',
 ]
+// Workspace packages under vendor/ that ship bundled like @dsh-std/*: the
+// repo depends on them as `workspace:*`, which a published manifest cannot
+// carry. The math image backend treats a missing copy as unavailable and
+// falls back to Unicode, so the dependency is optional like the others.
+const bundledVendorPackages = [
+  ['@dsh-tui-vendor/mathjax-tex-svg', 'mathjax-tex-svg'],
+]
 // The bundled dsh-auth copy: npm publishes under the TUI's scope, while the
 // repo develops against the `dsh-auth/` submodule via a `link:` dependency.
 const dshAuthName = '@deepseek-harness-tui/dsh-auth'
@@ -30,6 +37,11 @@ for (const packageName of bundledPackages) {
   const packageManifest = JSON.parse(await readFile(
     join(projectRoot, 'vendor', 'dsh-std', 'packages', packageName, 'package.json'),
   ))
+  delete manifest.dependencies?.[name]
+  manifest.optionalDependencies[name] = packageManifest.version
+}
+for (const [name, directory] of bundledVendorPackages) {
+  const packageManifest = JSON.parse(await readFile(join(projectRoot, 'vendor', directory, 'package.json')))
   delete manifest.dependencies?.[name]
   manifest.optionalDependencies[name] = packageManifest.version
 }

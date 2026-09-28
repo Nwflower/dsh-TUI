@@ -200,3 +200,45 @@ const mermaidDiagramsStore = createLiveSetting<boolean>(true, value => value !==
 export const subscribeMermaidDiagrams = mermaidDiagramsStore.subscribe
 export const getMermaidDiagrams = mermaidDiagramsStore.get
 export const applyMermaidDiagrams = mermaidDiagramsStore.apply
+
+/**
+ * How LaTeX math in replies renders (settings `dsh-tui.mathRendering`):
+ * `auto` picks the best available backend (today the Unicode renderer),
+ * `image` typesets complete block formulas as terminal images where the
+ * terminal supports graphics (Unicode everywhere else; opt-in until it has
+ * been validated across terminals, after which `auto` adopts it),
+ * `unicode` pins the Unicode renderer, `source` always shows the TeX.
+ */
+export type MathRendering = 'auto' | 'image' | 'unicode' | 'source'
+const MATH_RENDERING_MODES = new Set<MathRendering>(['auto', 'image', 'unicode', 'source'])
+
+export function normalizeMathRendering(value: unknown): MathRendering {
+  return typeof value === 'string' && MATH_RENDERING_MODES.has(value as MathRendering)
+    ? value as MathRendering
+    : 'auto'
+}
+
+/**
+ * Resolve the effective mode across the settings user layer and cordis.yml.
+ * `latexMath` predates `mathRendering` (unreleased main builds wrote it): at a
+ * layer without `mathRendering`, `false` means `source` and `true` means
+ * `auto`, and either one overrides the layers below.
+ */
+export function resolveMathRendering(
+  user: { mathRendering?: unknown; latexMath?: unknown },
+  config: { mathRendering?: unknown; latexMath?: unknown },
+): MathRendering {
+  for (const layer of [user, config]) {
+    if (layer.mathRendering !== undefined) return normalizeMathRendering(layer.mathRendering)
+    // An explicit legacy switch overrides lower layers either way: a user who
+    // turned math back on over a cordis.yml `false` keeps it on.
+    if (typeof layer.latexMath === 'boolean') return layer.latexMath ? 'auto' : 'source'
+  }
+  return 'auto'
+}
+
+/** Read at render time, so settled transcript blocks re-render on change. */
+const mathRenderingStore = createLiveSetting<MathRendering>('auto', normalizeMathRendering)
+export const subscribeMathRendering = mathRenderingStore.subscribe
+export const getMathRendering = mathRenderingStore.get
+export const applyMathRendering = mathRenderingStore.apply

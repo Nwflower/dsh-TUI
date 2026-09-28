@@ -24,6 +24,7 @@ import { createModeActions } from './channel/mode-actions.js'
 import { createFileActions } from './channel/file-actions.js'
 import { createReportActions } from './channel/reports.js'
 import { createSessionMetadataActions } from './channel/session-metadata.js'
+import { createForeignBrowser } from './migrate/browse.js'
 import { markChannelReadDirty } from '../adapter/channel/read-view.js'
 import { createAgentViewProjection } from './channel/agent-view-projection.js'
 import { createJobProjection } from './channel/job-projection.js'
@@ -208,9 +209,8 @@ function createChannelWithOwner(
       return agents?.get(id)
     },
   })
-  const subagentStore = subagentProjection.store
+  owner.own(() => subagentProjection.dispose())
   const subagentControl = subagentProjection.control
-  const pendingTaskDescriptions = subagentProjection.pendingTaskDescriptions
   // Job projection owns registry callbacks and transcript rows. The optional
   // service attachment has no authority after its injected lifetime ends.
   const jobProjection = createJobProjection(() => state, {
@@ -445,6 +445,7 @@ function createChannelWithOwner(
   // installed after ChannelState initialization below.
   let settleManualCompaction!: () => Promise<void>
   let compactManualSession!: () => void
+  let cancelManualCompaction!: () => void
   let forkSessionAction!: () => Promise<boolean>
   let rewindToAction!: (row: ChatRow, mode?: string | null) => Promise<string | null>
   let rewindToNodeAction!: (sessionId: string, seq: number, mode?: 'rewind' | 'fork') => Promise<string | null>
@@ -639,6 +640,7 @@ function createChannelWithOwner(
     runtime: adapterRuntime,
     grantStore: currentGrantStore,
   })
+  const foreignBrowser = createForeignBrowser(() => ctx.get('sessionPersistence'), owner.signal)
   sessionMetadataActions = createSessionMetadataActions(ctx, {
     owner,
     binding,
@@ -682,7 +684,7 @@ function createChannelWithOwner(
   const bash = ctx.get('shell') as ForegroundShell | undefined
 
   const projector = createChannelProjection(state, {
-    agent: () => binding.agent, rowIds, resetContextWarning, pendingTaskDescriptions, jobs: jobStore, inputConvergence,
+    agent: () => binding.agent, rowIds, resetContextWarning, jobs: jobStore, inputConvergence,
     checkContextWarning, notify: (...args) => notify(...args),
     tools: ctx.get('tools') as ToolsRegistryLike | undefined, renderer: rendererRuntime,
     attachments: () => ctx.get('attachments'),
@@ -822,6 +824,8 @@ function createChannelWithOwner(
     rowIds,
     resetProjector: () => projector.reset(),
     resetSubagents: subagentProjection.reset,
+    restoreSubagents: subagentProjection.restore,
+    parkSubagents: subagentProjection.park,
     resetJobs: resetJobProjection,
     replay: replaySessionSeed,
     settleReplay: projector.settleStreaming,
@@ -850,6 +854,7 @@ function createChannelWithOwner(
     // a target already running in this process is re-attached rather than
     // resumed twice from its log (which would mount one log in two places).
     adoptLive: target => adoptLiveAgent(target),
+    parkSubagents: subagentProjection.park,
     backgroundHandles,
     rowIds,
     resetProjector: () => projector.reset(),
@@ -909,6 +914,7 @@ function createChannelWithOwner(
   })
   settleManualCompaction = manualCompaction.settle
   compactManualSession = manualCompaction.compact
+  cancelManualCompaction = manualCompaction.cancel
   backgroundCurrentAction = createBackgroundCurrentAction(ctx, state, {
     configuredPreset: options.configuredPreset,
     configuredProvider: options.configuredProvider,
@@ -922,6 +928,7 @@ function createChannelWithOwner(
     rowIds,
     resetProjector: () => projector.reset(),
     resetSubagents: subagentProjection.reset,
+    parkSubagents: subagentProjection.park,
     resetJobs: resetJobProjection,
     refreshEffortLevels: () => modelActions.refreshEffortLevels(),
     bindAgent,
@@ -975,8 +982,12 @@ function createChannelWithOwner(
     sideQuestion: sessionMetadataActions.sideQuestion,
     listFileCandidates: fileActions.listFileCandidates,
     listFiles: fileActions.listFiles,
+    cachedSessions: sessionMetadataActions.cachedSessions,
     listSessions: sessionMetadataActions.listSessions,
     previewSession: sessionMetadataActions.previewSession,
+    listForeignSources: foreignBrowser.listSources,
+    listForeignSessions: foreignBrowser.listSessions,
+    importForeignSession: foreignBrowser.importSession,
     bindApprovalStore: agentView.bindApprovalStore,
     agentViewRows: agentView.rows,
     subscribeAgentView: agentView.subscribe,
@@ -993,6 +1004,7 @@ function createChannelWithOwner(
     deleteSession: sessionMetadataActions.deleteSession,
     renameSessionTo: sessionMetadataActions.renameSessionTo,
     compact: compactManualSession,
+    cancelCompact: cancelManualCompaction,
     runExternalCommand: externalCommands.invokeText,
     runExternalCommandOutcome: externalCommands.invoke,
     pushLocal: localActions.pushLocal,

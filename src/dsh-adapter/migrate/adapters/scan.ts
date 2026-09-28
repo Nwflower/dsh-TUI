@@ -15,7 +15,12 @@ import { join } from 'node:path'
 /** Walk-mode file/directory counter shared by every adapter's fast count. */
 export function countEntries(
   roots: readonly string[],
-  options: { readonly maxDepth: number, readonly fileMatch: (name: string) => boolean },
+  options: {
+    readonly maxDepth: number
+    readonly fileMatch: (name: string) => boolean
+    /** Directory names never descended into. */
+    readonly skipDirs?: readonly string[]
+  },
 ): number {
   let count = 0
   const walk = (dir: string, depth: number): void => {
@@ -28,8 +33,9 @@ export function countEntries(
     }
     for (const entry of entries) {
       const path = join(dir, entry.name)
-      if (entry.isDirectory()) walk(path, depth + 1)
-      else if (entry.isFile() && options.fileMatch(entry.name)) count += 1
+      if (entry.isDirectory()) {
+        if (options.skipDirs?.includes(entry.name) !== true) walk(path, depth + 1)
+      } else if (entry.isFile() && options.fileMatch(entry.name)) count += 1
     }
   }
   for (const root of roots) walk(root, 0)

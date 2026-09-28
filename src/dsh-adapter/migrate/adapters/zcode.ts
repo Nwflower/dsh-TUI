@@ -1,59 +1,42 @@
 /**
- * zcode adapter: `~/.zcode/v2/sessions/<dir>/<taskId>.json` — one JSON
- * object per conversation (`{ meta, messages }`), the simplest of the
- * foreign stores: plain-string contents and epoch-millisecond timestamps.
+ * zcode adapter: `~/.zcode/v2/sessions/<dir>/<taskId>.json`, one JSON object
+ * per conversation. Discovery lives here; the document is parsed by the pure
+ * zcode.parse.ts. A JSON document has no usable head, so the browse scan
+ * parses each changed file whole (they are small; unchanged ones are reused
+ * by fingerprint).
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/zcode
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { MigrationAdapter, MigrationDiscovery, MigrationSession, MigrationTurn } from '../types.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions, WalkSpec } from '../types.js'
 import { countEntries } from './scan.js'
+import { fingerprintOf, loadText, runScan, walkFiles, type ScanCandidate } from './scan-fs.js'
+import { parseZcodeSession } from './zcode.parse.js'
 
-interface ZcodeMessage { readonly role?: unknown, readonly content?: unknown, readonly timestamp?: unknown }
+const WALK: WalkSpec = { maxDepth: 3, match: name => name.endsWith('.json') }
+
+async function summarize({ ref, fp }: ScanCandidate): Promise<ForeignSessionSummary | null> {
+  const raw = await loadText(ref)
+  const session = typeof raw === 'string' ? parseZcodeSession(raw) : undefined
+  if (session === undefined) return null
+  return {
+    agentId: 'zcode',
+    sessionKey: session.sourceId,
+    ref,
+    title: session.title ?? '',
+    cwd: session.cwd,
+    lastMessageAt: fp.mtimeMs,
+    createdAt: session.startedAt || fp.mtimeMs,
+  }
+}
 
 function readOne(path: string): MigrationSession | undefined {
-  let raw: string
   try {
-    raw = readFileSync(path, 'utf8')
+    return parseZcodeSession(readFileSync(path, 'utf8'))
   } catch {
     return undefined
-  }
-  let doc: unknown
-  try {
-    doc = JSON.parse(raw)
-  } catch {
-    return undefined
-  }
-  // A legal `null` (or scalar) document is not a conversation; member
-  // access on it would throw and kill the whole scan.
-  if (!doc || typeof doc !== 'object') return undefined
-  const meta = (doc as { meta?: unknown }).meta
-  const messages = (doc as { messages?: unknown }).messages
-  // !x also rejects JSON null (typeof null === 'object').
-  if (!meta || typeof meta !== 'object' || !Array.isArray(messages)) return undefined
-  const taskId = (meta as { taskId?: unknown }).taskId
-  const cwd = (meta as { workspacePath?: unknown }).workspacePath
-  const title = (meta as { title?: unknown }).title
-  const createdAt = (meta as { createdAt?: unknown }).createdAt
-  if (typeof taskId !== 'string' || taskId === '') return undefined
-  if (typeof cwd !== 'string' || cwd === '') return undefined
-  const turns: MigrationTurn[] = []
-  for (const message of messages as readonly ZcodeMessage[]) {
-    if (!message || typeof message !== 'object') continue
-    if (message.role !== 'user' && message.role !== 'assistant') continue
-    if (typeof message.content !== 'string' || message.content === '') continue
-    const time = typeof message.timestamp === 'number' ? message.timestamp : 0
-    turns.push({ role: message.role, text: message.content, time })
-  }
-  if (turns.length === 0) return undefined
-  return {
-    sourceId: taskId,
-    cwd,
-    title: typeof title === 'string' && title !== '' ? title : undefined,
-    startedAt: typeof createdAt === 'number' ? createdAt : turns[0]!.time,
-    turns,
   }
 }
 
@@ -90,6 +73,16 @@ export const zcodeAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.json') })
+    return countEntries(this.roots(), { maxDepth: WALK.maxDepth, fileMatch: WALK.match })
+  },
+  walk: WALK,
+  async scan(options?: ScanOptions) {
+    const files = walkFiles(this.roots(), { ...WALK, signal: options?.signal })
+    return runScan(files, file => file.path, fingerprintOf, options, summarize)
+  },
+  async load(ref: string): Promise<MigrationSession | LoadSkip> {
+    const raw = await loadText(ref)
+    if (typeof raw !== 'string') return raw
+    return parseZcodeSession(raw) ?? { skip: 'not-a-session' }
   },
 }

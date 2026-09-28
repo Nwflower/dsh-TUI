@@ -23,9 +23,8 @@ import { codexAdapter } from './adapters/codex.js'
 import { ompAdapter } from './adapters/omp.js'
 import { grokBuildAdapter } from './adapters/grok-build.js'
 import { zcodeAdapter } from './adapters/zcode.js'
-import { sessionize } from './sessionize.js'
+import { foreignSessionId, writeImportedSession } from './import-one.js'
 import type { MigrationAdapter, MigrationSession } from './types.js'
-import { migrationUuid } from './uuid.js'
 
 export const MIGRATION_ADAPTERS: readonly MigrationAdapter[] = [
   claudeCodeAdapter,
@@ -35,15 +34,23 @@ export const MIGRATION_ADAPTERS: readonly MigrationAdapter[] = [
   grokBuildAdapter,
 ]
 
-/** The default import target: the shared DSH session store. */
+/**
+ * The default import target: the shared DSH session store, resolved exactly
+ * like the persistence backend's root (cordis.patch.yml): an explicit
+ * `DSH_TUI_SESSION_ROOT` first, then `$DSH_HOME/sessions`, then
+ * `~/.dsh/sessions`. Resolving it any other way would let the CLI import into
+ * a store the TUI (and the source tabs) never read.
+ */
 export function defaultSessionRoot(): string {
+  const override = process.env.DSH_TUI_SESSION_ROOT?.trim()
+  if (override) return override
   const dshHome = process.env.DSH_HOME?.trim()
   return join(dshHome ? dshHome : join(homedir(), '.dsh'), 'sessions')
 }
 
 /** Deterministic session id for one foreign conversation. */
 export function migrationSessionId(adapter: MigrationAdapter, session: MigrationSession): SessionId {
-  return SessionId(migrationUuid(`${adapter.id}:${session.sourceId}`))
+  return foreignSessionId(adapter.id, session.sourceId)
 }
 
 /** Structural slice of the persistence service this module consumes. */
@@ -112,14 +119,7 @@ export async function importSessions(
         continue
       }
       try {
-        const { header, events } = sessionize(id, adapter.id, session)
-        const handle = await persistence.create(header)
-        try {
-          await handle.append(events)
-          await handle.flush()
-        } finally {
-          await handle.close()
-        }
+        await writeImportedSession(persistence, id, adapter.id, session)
         present.add(id)
         imported += 1
       } catch (error) {

@@ -4,32 +4,38 @@
  * 第一版 PR 的教训：只验「头行合法」是假绿。本回归全程跑真实读取链——
  * 覆盖 src/dsh-adapter/migrate/：
  *   1. sessionize：官方 Session.append 生成的事件骨架（turn 配对 = 下一个
- *      user 关闭上一轮 + 收尾关闭最后一轮）、reasoning 块保留、header
- *      cwd/version、CJK 与 emoji 原样进入事件；
+ *      user 关闭上一轮 + 收尾关闭最后一轮，与 live loop 同序，首步空
+ *      system head）、reasoning 块保留、header cwd/version、CJK 与 emoji
+ *      原样进入事件；工具调用与步内输入（4c'，含落盘读回的 wire 合法性）、
+ *      中断轮与显式标题（4c'5–8）、原生压缩检查点（4c''）；
  *   2. 端到端往返（维护者要求的验收链）：fixture 会话 → importSessions
  *      （官方 JsonlSessionPersistence 落盘）→ open(id,'read') 读回 →
  *      Session.fromRestore + deriveMessages：角色/顺序/文本逐一断言；
  *   3. 续聊：restore 后的会话作为 seed 继续追加新一轮 → 写回 → 再读回，
- *      新旧消息同在（导入的会话是活的，不是只能看）；
+ *      新旧消息同在（导入的会话是活的，不是只能看）；按 live loop 的写法
+ *      替换 head 后系统提示词位于第 0 位（3b）；
  *   4. 幂等：同批 fixture 二次导入全部 existing，列表数不变；
  *   5. migrationUuid：确定性（同输入同 id）与区分性（不同 agent 不同 id）；
  *   6. adapter 解析冒烟：五家的最小 fixture 行（含 model 提取、null 防御、
  *      sourceId 必须是裸文件名——幂等键不随源目录移动）；
  *   7. /migrate 命令分类矩阵（pure）：fresh 会话的直接入口、--dry-run 与
  *      多参数语义必须与 CLI 一致。
- * 运行面的交互回归见 scripts/verify-migrate-command.tsx（挂真实 Chat）。
+ * 逐源解析规则见 scripts/verify-migrate-parse.mjs；运行面的交互回归见
+ * scripts/verify-migrate-command.tsx（挂真实 Chat）。
  *
  * 运行：node --import tsx/esm scripts/verify-migrate.mjs
  */
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 const { Session, SessionId, SessionLogOffset, SESSION_FORMAT_VERSION } = await import('@deepseek-ai/dsh-session')
 const { importSessions, migrationSessionId } = await import('../src/dsh-adapter/migrate/index.js')
 const { sessionize } = await import('../src/dsh-adapter/migrate/sessionize.js')
 const { migrationUuid } = await import('../src/dsh-adapter/migrate/uuid.js')
+const { fromRoleTurns, emptyStats } = await import('../src/dsh-adapter/migrate/parse/role-turns.js')
 const { claudeCodeAdapter } = await import('../src/dsh-adapter/migrate/adapters/claude-code.js')
 const { codexAdapter } = await import('../src/dsh-adapter/migrate/adapters/codex.js')
 const { ompAdapter } = await import('../src/dsh-adapter/migrate/adapters/omp.js')
@@ -43,8 +49,17 @@ function check(name, ok, extra = '') {
   if (!ok) process.exitCode = 1
 }
 
-/** Fixture：CJK + emoji + reasoning 的多形状会话。 */
+/** Fixture：CJK + emoji + reasoning 的多形状会话（按角色列表书写，经 fromRoleTurns 折成轮）。 */
 function fixtureSessions() {
+  return roleFixtures().map(session => ({
+    ...session,
+    titleExplicit: false,
+    turns: fromRoleTurns(session.turns),
+    stats: emptyStats(),
+  }))
+}
+
+function roleFixtures() {
   return [
     {
       sourceId: '11111111-1111-4111-8111-111111111111',
@@ -95,9 +110,14 @@ const fakeAdapter = { id: 'fixture', label: 'Fixture', roots: () => [], discover
   check('1a. header 携带 cwd 与当前格式版本', header.cwd === first.cwd && header.version === SESSION_FORMAT_VERSION, `v${header.version}`)
   check('1b. turn 配对：2 轮 = 2×start + 2×end',
     types.filter(t => t === 'turn/start').length === 2 && types.filter(t => t === 'turn/end').length === 2)
-  check('1c. 一 user 一 assistant 的常规轮',
-    types.join(' ') === 'turn/start user/message step/start assistant/message step/end turn/end turn/start user/message step/start assistant/message step/end turn/end',
+  // 与 live loop 同序：提问是首步的 user 消息；首步先写空 system head（surface 第 0 节点）
+  check('1c. 一 user 一 assistant 的常规轮（首步带空 system head）',
+    types.join(' ') === 'turn/start step/start system/message user/message assistant/message step/end turn/end turn/start step/start user/message assistant/message step/end turn/end',
     types.join(','))
+  const head = events.find(event => event.type === 'system/message')
+  check('1c2. head 为空内容的 system-prompt 消息且只写一次',
+    head?.data?.message?.content?.length === 0 && head?.data?.message?.source?.kind === 'system-prompt'
+    && types.filter(t => t === 'system/message').length === 1)
   const assistant = events.find(event => event.type === 'assistant/message')
   const blocks = assistant?.data?.message?.content ?? []
   check('1d. reasoning 块先于正文块',
@@ -161,6 +181,24 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   const reFlat = reRestored.deriveMessages().map(m => m.content.map(b => b.text ?? '').join('')).join('|')
   check('3a. 续聊后新旧消息同在', reFlat.includes('你好，世界——第一轮 🎏') && reFlat.includes('续聊：迁移之后继续提问'))
   await reHandle.close()
+
+  // 3b. 续聊首步 live loop 会把渲染后的系统提示词「替换」进 head（surface 第 0 节点）。
+  // 照它的写法替换一次：系统提示词必须落在第 0 位，而不是接在导入历史之后——
+  // 否则 pi-ai 这类只提取「首条 system」的适配器会把它当成一条 user 消息发出。
+  {
+    const { createSystemMessage } = await import('@deepseek-ai/dsh-llm')
+    const resumed = Session.create(id, reRead.events, reHandle.header)
+    const headSeq = reRead.events.find(event => event.type === 'system/message')?.seq
+    const nextTurn = reRead.events.filter(event => event.type === 'turn/end').length + 1
+    resumed.append('turn/start', { turn: nextTurn })
+    resumed.append('step/start', { turn: nextTurn, step: 1 })
+    resumed.append('system/message', { turn: nextTurn, step: 1, message: createSystemMessage('SYSTEM PROMPT') },
+      { surfaceOp: { op: 'replace', startSeq: headSeq, endSeq: headSeq }, sourceEventSeqs: [headSeq] })
+    const roles = resumed.deriveMessages().map(m => m.role)
+    check('3b. 续聊时系统提示词替换进 head、位于第 0 位',
+      headSeq !== undefined && roles[0] === 'system' && roles.filter(r => r === 'system').length === 1 && roles[1] === 'user',
+      roles.join(','))
+  }
   await Promise.resolve(readFiber.dispose()).catch(() => {})
 }
 
@@ -190,7 +228,7 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     const id = SessionId(migrationUuid(`fixture:${sessions[1].sourceId}`))
     const { events } = sessionize(id, 'fixture', sessions[1])
     const types = events.map(e => e.type).join(' ')
-    const expected = 'turn/start user/message step/start assistant/message step/end step/start assistant/message step/end step/start assistant/message step/end turn/end turn/start user/message turn/end'
+    const expected = 'turn/start step/start system/message user/message assistant/message step/end step/start assistant/message step/end step/start assistant/message step/end turn/end turn/start user/message turn/end'
     check('4c1. 一 user 三 assistant + 尾 user 的事件全序', types === expected, types)
   }
   // 夹具 3：孤立 assistant 开头（无 user 的首轮，一个 step 无 user/message）
@@ -199,7 +237,15 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     const { events } = sessionize(id, 'fixture', sessions[2])
     const types = events.map(e => e.type).join(' ')
     check('4c2. 孤立 assistant 开头的事件全序',
-      types === 'turn/start step/start assistant/message step/end turn/end', types)
+      types === 'turn/start step/start system/message assistant/message step/end turn/end', types)
+  }
+  // 只有一条无回复提问的会话：head 需要打开的步，首轮补一个只装 head 与提问的步
+  {
+    const lone = { ...sessions[1], turns: fromRoleTurns([{ role: 'user', text: '只有提问', time: 0 }]) }
+    const id = SessionId(migrationUuid('fixture:lone'))
+    const types = sessionize(id, 'fixture', lone).events.map(e => e.type).join(' ')
+    check('4c2b. 无步首轮：head 与提问装在同一步',
+      types === 'turn/start step/start system/message user/message step/end turn/end', types)
   }
   // 夹具 2 端到端：restore 后 5 条消息且末位是 user（尾问保留）
   {
@@ -226,6 +272,169 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     await Promise.resolve(fiber2.dispose()).catch(() => {})
     rmSync(root2, { recursive: true, force: true })
   }
+}
+
+// ── 4c'. 工具调用与步内输入：事件顺序 + 落盘读回后的 wire 合法性 ─────────
+{
+  const { newStep } = await import('../src/dsh-adapter/migrate/parse/tools.js')
+  const step1 = newStep('model-a')
+  step1.blocks.push({ type: 'reasoning', text: '先看两个文件' }, { type: 'text', text: '我读一下' },
+    { type: 'tool-call', id: 'call_a', name: 'read', arguments: '{"path":"a.ts"}' },
+    { type: 'tool-call', id: 'call_b', name: 'read', arguments: '{"path":"b.ts"}' })
+  step1.results.push({ callId: 'call_a', text: 'A 内容', isError: false }, { callId: 'call_b', text: '', isError: true })
+  const step2 = newStep('model-a')
+  step2.inputs.push('[Image: 截图说明]')
+  step2.blocks.push({ type: 'text', text: '看完了' })
+  const toolSession = {
+    sourceId: '55555555-5555-4555-8555-555555555555', cwd: '/tmp/tools', startedAt: 1790000400000,
+    titleExplicit: false, stats: emptyStats(),
+    turns: [{ prompt: '读 a 和 b', steps: [step1, step2] }],
+  }
+  const id = migrationSessionId(fakeAdapter, toolSession)
+  const { events } = sessionize(id, 'fixture', toolSession)
+  const types = events.map(e => e.type).join(' ')
+  check("4c'1. 步内顺序：assistant → tool/call×n → tool/result×n；步内输入在 assistant 之前",
+    types === 'turn/start step/start system/message user/message assistant/message tool/call tool/call tool/result tool/result step/end'
+      + ' step/start user/message assistant/message step/end turn/end', types)
+  const calls = events.filter(e => e.type === 'tool/call')
+  const results = events.filter(e => e.type === 'tool/result')
+  check("4c'2. tool/result 引用各自 tool/call 的 seq，错误标记保留",
+    results.length === 2 && results[0].sourceEventSeqs?.[0] === calls[0].seq && results[1].sourceEventSeqs?.[0] === calls[1].seq
+    && results[1].data.message.isError === true && results[1].data.message.content.length === 0)
+  const assistant = events.find(e => e.type === 'assistant/message')
+  check("4c'3. assistant 内容携带 tool-call 块（wire 的 tool_calls 由它派生）",
+    assistant.data.message.content.filter(b => b.type === 'tool-call').map(b => b.id).join(',') === 'call_a,call_b')
+
+  const abortedSession = { ...toolSession, turns: [{ prompt: '做到一半', steps: [], aborted: true }, { prompt: '接着', steps: [] }] }
+  const ends = sessionize(id, 'fixture', abortedSession).events.filter(e => e.type === 'turn/end').map(e => e.data.reason)
+  check("4c'5. 源标记中断的轮以 aborted(legacy) 收尾，其余 completed",
+    ends[0]?.kind === 'aborted' && ends[0]?.reason?.kind === 'legacy' && ends[1]?.kind === 'completed', JSON.stringify(ends))
+
+  const titled = { ...toolSession, sourceId: 'titled', title: '  源自带的\n标题  ', titleExplicit: true }
+  const titledEvents = sessionize(SessionId(migrationUuid('fixture:titled')), 'fixture', titled).events
+  const last = titledEvents.at(-1)
+  check("4c'6. 显式标题归一后作为末尾 session/title 写入",
+    last?.type === 'session/title' && last.data.title === '源自带的 标题' && last.data.source?.kind === 'user', JSON.stringify(last?.data))
+  check("4c'7. 首问兜底的标题不写 session/title（留给 DSH 自己回退）",
+    !sessionize(id, 'fixture', { ...toolSession, title: '兜底', titleExplicit: false }).events.some(e => e.type === 'session/title'))
+
+  const rootTools = mkdtempSync(join(tmpdir(), 'verify-migrate-tools-'))
+  const run = await importSessions(fakeAdapter, rootTools, [toolSession, titled])
+  const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  const { Context } = await import('@deepseek-ai/cordis')
+  const ctxT = new Context()
+  const fiberT = ctxT.plugin(JsonlSessionPersistence, { root: rootTools })
+  for (let i = 0; i < 100 && ctxT.get('sessionPersistence') === undefined; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  const h = await ctxT.get('sessionPersistence').open(id, 'read')
+  const r = await h.read()
+  await h.close()
+  const msgs = Session.fromRestore(id, r.events, h.header, SessionLogOffset(0), r.eventState).deriveMessages()
+  // wire 规则：带 tool_calls 的 assistant 之后，紧跟的消息恰好是覆盖全部 call id 的 tool 消息
+  let legal = true
+  for (let i = 0; i < msgs.length; i++) {
+    const ids = msgs[i].role === 'assistant' ? msgs[i].content.filter(b => b.type === 'tool-call').map(b => b.id) : []
+    if (ids.length === 0) continue
+    const answered = msgs.slice(i + 1, i + 1 + ids.length)
+    if (answered.length !== ids.length || answered.some((m, k) => m.role !== 'tool' || m.toolCallId !== ids[k])) legal = false
+  }
+  const th = await ctxT.get('sessionPersistence').open(migrationSessionId(fakeAdapter, titled), 'read')
+  const titleRead = (await th.read()).events.filter(e => e.type === 'session/title').map(e => e.data.title)
+  await th.close()
+  check("4c'8. 带标题的会话经官方读取链可读回标题", titleRead.join('|') === '源自带的 标题', titleRead.join('|'))
+  check("4c'4. 落盘读回后 wire 合法（每个 tool_call 紧跟其 tool 消息）",
+    run.imported === 2 && legal && msgs.map(m => m.role).join(',') === 'user,assistant,tool,tool,user,assistant',
+    msgs.map(m => m.role).join(','))
+  await Promise.resolve(fiberT.dispose()).catch(() => {})
+  rmSync(rootTools, { recursive: true, force: true })
+}
+
+// ── 4c''. 压缩检查点：原生压缩事务 + 读回后模型只见「检查点 + 之后」─────────
+{
+  const { newStep } = await import('../src/dsh-adapter/migrate/parse/tools.js')
+  const answer = (text, calls = []) => {
+    const step = newStep()
+    step.blocks.push({ type: 'text', text }, ...calls.map(id => ({ type: 'tool-call', id, name: 'bash', arguments: '{}' })))
+    for (const id of calls) step.results.push({ callId: id, text: `${id} 输出`, isError: false })
+    return step
+  }
+  const compacted = {
+    sourceId: '66666666-6666-4666-8666-666666666666', cwd: '/tmp/compact', startedAt: 1790000500000,
+    titleExplicit: false, stats: emptyStats(),
+    turns: [
+      { prompt: '压缩前的提问', steps: [answer('压缩前的回答', ['c1'])] },
+      { prompt: '压缩后的提问', compaction: { summary: '第一次压缩摘要', model: 'src-model' }, steps: [answer('压缩后的回答')] },
+      { prompt: '', compaction: { summary: '第二次压缩摘要' }, steps: [answer('续跑的回答')] },
+      // 会话正好停在压缩点：只有边界、没有提问与回复，不单独成轮
+      { prompt: '', compaction: { summary: '尾部压缩摘要' }, steps: [] },
+    ],
+  }
+  const id = migrationSessionId(fakeAdapter, compacted)
+  const { events } = sessionize(id, 'fixture', compacted)
+  const types = events.map(e => e.type)
+  const starts = types.filter(t => t === 'compaction/start').length
+  check("4c''1. 每个边界一次原生压缩事务（start→summary→检查点→end，位于 turn/start 之前）",
+    starts === 3 && types.join(' ').includes('turn/end compaction/start compaction/summary user/message compaction/end turn/start'),
+    types.join(' '))
+  const ckpts = events.filter(e => e.type === 'user/message' && e.data.source?.kind === 'compact-checkpoint')
+  const summaries = events.filter(e => e.type === 'compaction/summary')
+  const head = events.find(e => e.type === 'system/message')
+  const first = ckpts[0]
+  check("4c''2. 检查点 replace 覆盖 head 之后的全部节点，sourceEventSeqs = shadowedSeqs",
+    first !== undefined && typeof first.surfaceOp === 'object' && first.surfaceOp.startSeq > head.seq
+    && JSON.stringify(first.sourceEventSeqs) === JSON.stringify(summaries[0].data.shadowedSeqs)
+    && first.surfaceOp.startSeq === summaries[0].data.shadowedRange.start && first.surfaceOp.endSeq === summaries[0].data.shadowedRange.end
+    && first.data.source.compactionId === summaries[0].data.compactionId && summaries[0].data.model === 'src-model')
+  check("4c''3. 第二次压缩遮蔽上一个检查点及其后的节点",
+    summaries[1]?.data.shadowedSeqs[0] === ckpts[0].seq)
+  check("4c''4. 停在压缩点的尾部边界不产生空轮",
+    types.filter(t => t === 'turn/start').length === 3)
+
+  const rootC = mkdtempSync(join(tmpdir(), 'verify-migrate-compact-'))
+  const run = await importSessions(fakeAdapter, rootC, [compacted])
+  const { default: JsonlSessionPersistence } = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  const { Context } = await import('@deepseek-ai/cordis')
+  const ctxC = new Context()
+  const fiberC = ctxC.plugin(JsonlSessionPersistence, { root: rootC })
+  for (let i = 0; i < 100 && ctxC.get('sessionPersistence') === undefined; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  const h = await ctxC.get('sessionPersistence').open(id, 'read')
+  const r = await h.read()
+  await h.close()
+  const texts = Session.fromRestore(id, r.events, h.header, SessionLogOffset(0), r.eventState).deriveMessages()
+    .map(m => `${m.role}:${m.content.map(b => b.text ?? '').join('')}`)
+  const { CHECKPOINT_PREAMBLE, SUMMARY_OPEN_TAG, SUMMARY_CLOSE_TAG } = await import('../src/dsh-adapter/migrate/sessionize.js')
+  check("4c''5. 落盘读回：模型只见最后一个检查点 + 其后的对话，原始事件仍在日志里",
+    run.imported === 1 && texts.join('|') === `user:${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}尾部压缩摘要${SUMMARY_CLOSE_TAG}`
+    && r.events.some(e => e.type === 'user/message' && e.data.content?.[0]?.text === '压缩前的提问'),
+    texts.join('|'))
+  await Promise.resolve(fiberC.dispose()).catch(() => {})
+  rmSync(rootC, { recursive: true, force: true })
+
+  // 边界之前没有可折叠的节点：摘要作为首轮开头的一条 user 消息，不发事务
+  const early = { ...compacted, turns: [{ prompt: '第一问', compaction: { summary: '无处可折的摘要' }, steps: [answer('答')] }] }
+  const earlyEvents = sessionize(id, 'fixture', early).events
+  const users = earlyEvents.filter(e => e.type === 'user/message').map(e => e.data.content[0].text)
+  check("4c''6. 无可遮蔽节点时不发事务，摘要落为首条 user 消息",
+    !earlyEvents.some(e => e.type === 'compaction/start') && users.join('|') === '无处可折的摘要|第一问', users.join('|'))
+
+  // 与真实 /compact 的对照：检查点的包装（前言 + <compacted-summary> 标签）
+  // 必须与已安装的压缩引擎逐字一致——后续自动压缩靠这对标签认出前代检查点，
+  // 包装漂移会让它把摘要当普通内容再摘要。常量取自引擎自己的源码，引擎一变
+  // 这里就失败，而不是让测试替分歧形状背书。
+  const engineSource = readFileSync(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-compaction-basic')), 'utf8')
+  const constant = name => new RegExp(`\\b${name}\\s*=\\s*(["'\`])((?:\\\\.|(?!\\1).)*)\\1`).exec(engineSource)?.[2]
+  const checkpoint = ckpts[0].data.content
+  check("4c''7. 检查点包装与已安装的压缩引擎一致（前言、开闭标签、三段结构，摘要事件仍存裸摘要）",
+    constant('CHECKPOINT_PREAMBLE') === CHECKPOINT_PREAMBLE
+    && constant('SUMMARY_OPEN_TAG') === SUMMARY_OPEN_TAG && constant('SUMMARY_CLOSE_TAG') === SUMMARY_CLOSE_TAG
+    && engineSource.includes('${CHECKPOINT_PREAMBLE}\\n\\n${SUMMARY_OPEN_TAG}')
+    && checkpoint.length === 3 && checkpoint[0].text === `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}`
+    && checkpoint[1].text === '第一次压缩摘要' && checkpoint[2].text === SUMMARY_CLOSE_TAG
+    && summaries[0].data.summary[0].text === '第一次压缩摘要',
+    `preamble=${constant('CHECKPOINT_PREAMBLE') === CHECKPOINT_PREAMBLE} open=${constant('SUMMARY_OPEN_TAG')} close=${constant('SUMMARY_CLOSE_TAG')}`)
 }
 
 // ── 4d. 单会话失败不中断批次（deep-review M6：容错路径必须被触发）────────
@@ -307,6 +516,33 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     if (prevDsh === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = prevDsh
     rmSync(home, { recursive: true, force: true })
+  }
+}
+
+// ── 4e'. 导入目标根与持久化后端同一解析顺序 ─────────────────────────────
+// cordis.patch.yml 的后端根是 DSH_TUI_SESSION_ROOT ?? $DSH_HOME/sessions ??
+// ~/.dsh/sessions；CLI 若不认第一项，设了它的机器上两个入口分库，同一条会话
+// 落两份、互相看不见。
+{
+  const { defaultSessionRoot } = await import('../src/dsh-adapter/migrate/index.js')
+  const saved = { root: process.env.DSH_TUI_SESSION_ROOT, dsh: process.env.DSH_HOME }
+  try {
+    process.env.DSH_TUI_SESSION_ROOT = join(tmpdir(), 'explicit-root')
+    process.env.DSH_HOME = join(tmpdir(), 'dsh-home')
+    const explicit = defaultSessionRoot()
+    process.env.DSH_TUI_SESSION_ROOT = '   '
+    const blankFallsThrough = defaultSessionRoot()
+    delete process.env.DSH_TUI_SESSION_ROOT
+    const fromDshHome = defaultSessionRoot()
+    check('4e7. DSH_TUI_SESSION_ROOT 优先于 DSH_HOME',
+      explicit === join(tmpdir(), 'explicit-root'), explicit)
+    check('4e8. 空白的 DSH_TUI_SESSION_ROOT 视为未设，回落 $DSH_HOME/sessions',
+      blankFallsThrough === join(tmpdir(), 'dsh-home', 'sessions') && fromDshHome === blankFallsThrough, `${blankFallsThrough} / ${fromDshHome}`)
+  } finally {
+    if (saved.root === undefined) delete process.env.DSH_TUI_SESSION_ROOT
+    else process.env.DSH_TUI_SESSION_ROOT = saved.root
+    if (saved.dsh === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved.dsh
   }
 }
 
@@ -426,6 +662,16 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
     JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:00:01Z', cwd: '/tmp/cc', message: { role: 'assistant', model: 'claude-sonnet-5', content: [{ type: 'text', text: '带思考的答复' }, { type: 'thinking', thinking: '思考内容' }] } }),
     '',
   ].join('\n'))
+  // 同一会话的子代理 transcript（<session>/subagents/）与辅助 transcript：都不是独立会话
+  const ccSub = join(ccDir, firstUuid(), 'subagents')
+  mkdirSync(ccSub, { recursive: true })
+  const auxLines = [
+    JSON.stringify({ type: 'user', sessionId: firstUuid(), cwd: '/tmp/cc', message: { role: 'user', content: '子代理任务' } }),
+    JSON.stringify({ type: 'assistant', sessionId: firstUuid(), cwd: '/tmp/cc', message: { id: 'ms', role: 'assistant', content: [{ type: 'text', text: '子代理回答' }] } }),
+    '',
+  ].join('\n')
+  writeFileSync(join(ccSub, 'agent-a1.jsonl'), auxLines)
+  writeFileSync(join(ccDir, 'agent-aux.jsonl'), auxLines)
   // codex：turn_context 带 model + assistant 输出
   const codexDay = join(home, '.codex', 'sessions', '2026', '01', '01')
   mkdirSync(codexDay, { recursive: true })
@@ -496,31 +742,36 @@ const root = mkdtempSync(join(tmpdir(), 'verify-migrate-'))
   process.env.HOME = home
   process.env.USERPROFILE = home
   process.env.GROK_HOME = join(home, '.grok')
+  // 断言读轮模型：一轮 = 一个提问 + 若干步；reasoning 是步内的 reasoning 块
+  const stepOf = session => session?.turns[0]?.steps[0]
+  const blockText = (step, type) => step?.blocks.find(block => block.type === type)?.text
   const cc = claudeCodeAdapter.discover()
-  const ccTurns = cc.sessions[0]?.turns ?? []
+  const ccStep = stepOf(cc.sessions[0])
   check('6a. claude-code 解析（字符串 user + thinking + model）',
-    cc.sessions.length === 1 && ccTurns.length === 2
-    && ccTurns[1].reasoning === '思考内容' && ccTurns[1].model === 'claude-sonnet-5'
+    cc.sessions.length === 1 && cc.sessions[0].turns.length === 1 && cc.sessions[0].turns[0].prompt === '纯文本提问'
+    && blockText(ccStep, 'reasoning') === '思考内容' && ccStep?.model === 'claude-sonnet-5'
     && cc.sessions[0].cwd === '/tmp/cc')
+  check('6a2. claude-code 的 subagents/ 与辅助 transcript 不成会话，也不计入 count',
+    cc.sessions.length === 1 && claudeCodeAdapter.count() === 2, `count=${claudeCodeAdapter.count()}`)
   const codexFound = codexAdapter.discover()
-  const codexTurns = codexFound.sessions[0]?.turns ?? []
+  const codexStep = stepOf(codexFound.sessions[0])
   check('6b. codex 解析（turn_context model 前向）',
-    codexFound.sessions.length === 1 && codexTurns.length === 2
-    && codexTurns[1].model === 'gpt-5.1' && codexFound.sessions[0].cwd === '/tmp/codex')
+    codexFound.sessions.length === 1 && codexFound.sessions[0].turns.length === 1
+    && codexStep?.model === 'gpt-5.1' && blockText(codexStep, 'text') === 'codex 答复'
+    && codexFound.sessions[0].cwd === '/tmp/codex')
   const ompFound = ompAdapter.discover()
-  const ompTurns = ompFound.sessions[0]?.turns ?? []
+  const ompStep = stepOf(ompFound.sessions[0])
   check('6c. omp 解析（thinking 块）',
-    ompFound.sessions.length === 1 && ompTurns.length === 2 && ompTurns[1].reasoning === 'omp 思考')
+    ompFound.sessions.length === 1 && ompFound.sessions[0].turns.length === 1 && blockText(ompStep, 'reasoning') === 'omp 思考')
   const zcFound = zcodeAdapter.discover()
-  const zcTurns = zcFound.sessions[0]?.turns ?? []
   check('6d. zcode 解析（单对象 + 元素级 null 跳过）',
-    zcFound.sessions.length === 1 && zcTurns.length === 2
+    zcFound.sessions.length === 1 && zcFound.sessions[0].turns.length === 1 && zcFound.sessions[0].turns[0].steps.length === 1
     && zcFound.sessions[0].cwd === '/tmp/zc' && zcFound.sessions[0].title === 'zcode 会话标题')
   const gbFound = grokBuildAdapter.discover()
-  const gbTurns = gbFound.sessions[0]?.turns ?? []
+  const gbStep = stepOf(gbFound.sessions[0])
   check('6e. grok-build 解析（reasoning 兄弟行 + synthetic 过滤）',
-    gbFound.sessions.length === 1 && gbTurns.length === 2
-    && gbTurns[1].reasoning === 'grok 思考' && gbTurns[1].model === 'grok-4-fast'
+    gbFound.sessions.length === 1 && gbFound.sessions[0].turns.length === 1
+    && blockText(gbStep, 'reasoning') === 'grok 思考' && gbStep?.model === 'grok-4-fast'
     && gbFound.sessions[0].cwd === '/tmp/grok')
   // sourceId 是幂等键的一部分（UUIDv5 输入）：它必须是裸文件名，不能把源目录
   // 带进来——join() 在 Windows 产出 `\`，旧实现的 split('/') 会退化成整条绝对

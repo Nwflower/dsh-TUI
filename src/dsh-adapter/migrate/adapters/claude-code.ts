@@ -1,132 +1,77 @@
 /**
  * Claude Code adapter: `~/.claude/projects/<munged-cwd>/<session>.jsonl`.
- * Lines are self-describing (`type` field); user/assistant message lines carry
- * `message.content` as a plain string OR a content-block array — both are
- * normalized here. Tool results surface as user lines with machine content
- * and are skipped (their `content` is an array of tool_result blocks).
+ * File discovery lives here; the line format is parsed by the pure
+ * claude-code.parse.ts. The browse scan derives each summary from the same
+ * parser run over the file's head, plus a tail window for the /rename title
+ * (renames append, the last one wins).
  *
  * @module @deepseek-harness-tui/dsh-tui/migrate/adapters/claude-code
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
-import type { MigrationAdapter, MigrationDiscovery, MigrationSession, MigrationTurn } from '../types.js'
+import { basename, dirname, join } from 'node:path'
+import { parseJsonl } from '../parse/jsonl.js'
+import { normalizeTitle } from '../parse/title.js'
+import type { ForeignSessionSummary, LoadSkip, MigrationAdapter, MigrationDiscovery, MigrationSession, ScanOptions, WalkSpec } from '../types.js'
+import { parseClaudeTranscript } from './claude-code.parse.js'
 import { countEntries } from './scan.js'
+import { fingerprintOf, loadText, readTail, runScan, walkFiles, withHead, type ScanCandidate } from './scan-fs.js'
 
-interface CodeBlock { readonly type?: unknown, readonly text?: unknown, readonly thinking?: unknown }
+/** Sub-agent transcripts (`<session>/subagents/*.jsonl`) belong to their
+ *  parent session; they are never conversations of their own. */
+const SUBAGENT_DIR = 'subagents'
 
-function textOf(content: unknown): string | undefined {
-  if (typeof content === 'string') return content === '' ? undefined : content
-  if (!Array.isArray(content)) return undefined
-  const parts: string[] = []
-  for (const block of content as CodeBlock[]) {
-    if (block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string' && block.text !== '') {
-      parts.push(block.text)
-    }
+const WALK: WalkSpec = { maxDepth: 3, match: name => name.endsWith('.jsonl'), skipDirs: [SUBAGENT_DIR] }
+
+/** Tail window searched for the latest /rename title. */
+const TITLE_TAIL_BYTES = 64 * 1024
+
+/** File name without `.jsonl`: the session's stable source id. */
+const fileStemOf = (path: string): string => basename(path).replace(/\.jsonl$/u, '')
+
+/** cwd guessed from the project directory name, for logs whose lines record none. */
+const fallbackCwdOf = (path: string): string => unmunge(basename(dirname(path))) ?? homedir()
+
+/** The last /rename title in a tail window, when there is one. */
+function tailRenameTitle(tail: string): string | undefined {
+  let title: string | undefined
+  for (const record of parseJsonl(tail).records) {
+    if (record.type === 'custom-title' && typeof record.customTitle === 'string' && record.customTitle.trim() !== '') title = record.customTitle
   }
-  return parts.length === 0 ? undefined : parts.join('\n\n')
+  return title
 }
 
-/** Strip Claude Code's inline <system-reminder> machine blocks from user text.
- *  Fast path first: plain text without the opening tag skips the regex
- *  entirely (the lazy [\s\S]*? scan is O(text) per unclosed tag start and a
- *  hostile single line could burn minutes of CPU — deep-review m1). */
-function stripReminders(text: string): string {
-  if (!text.includes('<system-reminder')) return text.trim()
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gu, '').trim()
-}
-
-function toMillis(iso: unknown): number {
-  return typeof iso === 'string' ? Date.parse(iso) || 0 : 0
-}
-
-/** Extract the text of a user line, skipping tool_result-only lines. */
-function userText(message: { content?: unknown } | undefined | null): string | undefined {
-  if (message === undefined || message === null) return undefined
-  const content = message.content
-  if (Array.isArray(content)) {
-    const blocks = content as CodeBlock[]
-    if (blocks.some(block => block?.type === 'tool_result')) return undefined
+async function summarize({ ref, fp }: ScanCandidate): Promise<ForeignSessionSummary | null> {
+  const input = { fileStem: fileStemOf(ref), fallbackCwd: fallbackCwdOf(ref) }
+  const found = await withHead(ref, fp.size, (raw, whole) => {
+    const session = parseClaudeTranscript({ ...input, raw })
+    return session === undefined ? undefined : { session, whole }
+  })
+  if (found === undefined) return null
+  const { session, whole } = found
+  const renamed = whole ? undefined : tailRenameTitle(await readTail(ref, TITLE_TAIL_BYTES, fp.size))
+  return {
+    agentId: 'claude-code',
+    sessionKey: session.sourceId,
+    ref,
+    title: renamed === undefined ? session.title ?? '' : normalizeTitle(renamed),
+    cwd: session.cwd,
+    lastMessageAt: fp.mtimeMs,
+    createdAt: session.startedAt || fp.mtimeMs,
   }
-  const raw = textOf(content)
-  if (raw === undefined) return undefined
-  const stripped = stripReminders(raw)
-  return stripped === '' ? undefined : stripped
 }
 
 function readOne(path: string, fallbackCwd: string): MigrationSession | undefined {
-  let lines: string[]
+  let raw: string
   try {
-    lines = readFileSync(path, 'utf8').split('\n')
+    raw = readFileSync(path, 'utf8')
   } catch {
     return undefined
   }
   // basename(), not split('/'): join() produces `\` separators on Windows, so
   // splitting on '/' would leave the WHOLE absolute path as the id — and the
   // id is the dedupe key (moving the source store would re-import everything).
-  const sourceId = basename(path).replace(/\.jsonl$/u, '')
-  let startedAt = 0
-  let turns: MigrationTurn[] = []
-  let lineCwd: string | undefined
-  for (const line of lines) {
-    if (line === '') continue
-    let entry: Record<string, unknown>
-    try {
-      entry = JSON.parse(line) as Record<string, unknown>
-    } catch {
-      continue
-    }
-    // A legal `null` (or scalar) line is not a record; reading .type on it
-    // would throw and kill the whole scan (codex adversarial review).
-    if (entry === null || typeof entry !== 'object') continue
-    const type = entry.type
-    if (type === 'session' && startedAt === 0) {
-      startedAt = toMillis(entry.timestamp)
-      continue
-    }
-    if (type !== 'user' && type !== 'assistant') continue
-    if (entry.isSidechain === true || entry.isMeta === true) continue
-    const message = entry.message as { role?: unknown, content?: unknown, model?: unknown } | undefined
-    if (!message || typeof message !== 'object') continue  // !x also rejects JSON null (typeof null === 'object')
-    // Claude Code writes the authoritative cwd on every message line; the
-    // dash-munged directory name cannot preserve `_`/`.`/`-` and the
-    // system-reminder marker appears in only a small minority of logs.
-    if (typeof entry.cwd === 'string' && entry.cwd !== '') lineCwd = entry.cwd
-    const time = toMillis(entry.timestamp)
-    if (type === 'user') {
-      const text = userText(message as { content?: unknown })
-      if (text === undefined) continue
-      turns.push({ role: 'user', text, time })
-    } else {
-      const content = message.content
-      const text = textOf(content) ?? ''
-      // Claude Code thinking blocks carry the trace in a `thinking` field
-      // (not `text`); accept both so a pure-reasoning message never vanishes.
-      const reasoning = Array.isArray(content)
-        ? (content as CodeBlock[]).filter(block => block?.type === 'thinking')
-          .map(block => block.thinking ?? block.text)
-          .filter((t): t is string => typeof t === 'string').join('\n\n')
-        : ''
-      if (text === '' && reasoning === '') continue
-      const model = typeof message.model === 'string' && message.model !== '' ? message.model : undefined
-      turns.push({ role: 'assistant', text, reasoning: reasoning === '' ? undefined : reasoning, model, time })
-    }
-  }
-  if (turns.length === 0) return undefined
-  // cwd precedence: the per-line `cwd` field (authoritative, present on real
-  // logs) → the first user prompt's system-reminder → the unmunged directory
-  // name (lossy fallback for foreign/moved logs).
-  let cwd = lineCwd ?? fallbackCwd
-  const reminder = turns.find(turn => turn.role === 'user' && turn.text.includes('Primary working directory:'))
-  if (cwd === fallbackCwd && reminder !== undefined) {
-    const match = /Primary working directory: (\S+)/u.exec(reminder.text)
-    if (match !== null) cwd = match[1]
-  }
-  // A sidechain-heavy log may carry nothing but tool chatter; keep it honest.
-  const userTurns = turns.filter(turn => turn.role === 'user')
-  if (userTurns.length === 0) return undefined
-  turns = turns.filter(turn => turn.role === 'user' || turn.text !== '' || turn.reasoning !== undefined)
-  return { sourceId, cwd, startedAt: startedAt || turns[0]!.time, turns }
+  return parseClaudeTranscript({ raw, fileStem: fileStemOf(path), fallbackCwd })
 }
 
 export const claudeCodeAdapter: MigrationAdapter = {
@@ -146,8 +91,9 @@ export const claudeCodeAdapter: MigrationAdapter = {
       }
       for (const entry of entries) {
         const path = join(dir, entry.name)
-        if (entry.isDirectory()) walk(path, depth + 1, unmunge(entry.name) ?? fallbackCwd)
-        else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        if (entry.isDirectory()) {
+          if (entry.name !== SUBAGENT_DIR) walk(path, depth + 1, unmunge(entry.name) ?? fallbackCwd)
+        } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
           try {
             if (statSync(path).size > 64 * 1024 * 1024) continue
           } catch {
@@ -162,7 +108,17 @@ export const claudeCodeAdapter: MigrationAdapter = {
     return { roots, sessions }
   },
   count(): number {
-    return countEntries(this.roots(), { maxDepth: 3, fileMatch: name => name.endsWith('.jsonl') })
+    return countEntries(this.roots(), { maxDepth: WALK.maxDepth, fileMatch: WALK.match, skipDirs: WALK.skipDirs })
+  },
+  walk: WALK,
+  async scan(options?: ScanOptions) {
+    const files = walkFiles(this.roots(), { ...WALK, signal: options?.signal })
+    return runScan(files, file => file.path, fingerprintOf, options, summarize)
+  },
+  async load(ref: string): Promise<MigrationSession | LoadSkip> {
+    const raw = await loadText(ref)
+    if (typeof raw !== 'string') return raw
+    return parseClaudeTranscript({ raw, fileStem: fileStemOf(ref), fallbackCwd: fallbackCwdOf(ref) }) ?? { skip: 'not-a-session' }
   },
 }
 

@@ -27,8 +27,9 @@
 - **终端原生界面** — 流式 Markdown、工具卡、`/` 与 `@` 补全、`#L12-14` 行区间、历史搜索、中英界面。
 - **图片** — Kitty/Sixel 缩略图，居中大图可缩放平移，粘贴前按限额适配，无图形时文字回退。
 - **Mermaid 图表** — ```` ```mermaid ```` 代码块画成 Unicode 字符图。
+- **LaTeX 公式** — `$…$` 与 `$$…$$` 公式转成 Unicode 文本，块级公式里的分数与上下限竖排；`mathRendering: image` 时在支持图形的终端里把块级公式与能压成一行的行内公式排成终端图片。
 - **时间轴** — 全部回合可点；右栏时间线 / 滚动条 / 隐藏。
-- **实时状态** — 工作动画、上下文条、TPS、缓存命中率、推理强度、token、Git 与会话信息。
+- **实时状态** — 工作动画、上下文条、TPS、缓存命中率、推理强度、token、本会话费用估算（主会话 + 子代理）、Git 与会话信息。
 - **唯一的会话管理界面** — `/resume` `/home` `/agentview` `/bg` `⌸`。
 - **会话工作流** — `/new` `/compact` `/export` `/btw`、模型热切换、fork、回溯、vim、全屏草稿编辑器。
 - **IDE 选区通道** — VS Code 里选中的代码进 prompt。
@@ -76,7 +77,7 @@
 
 前置条件：安装 [Node.js](https://nodejs.org/zh-cn) 与 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，并配置 `DEEPSEEK_API_KEY`。
 
-主适配目标为 DSH `0.1.7-rc.2`，已接入新版 Shell API、V4 会话消息、声明式预设与
+主适配目标为 DSH `0.2.0-rc.1`，已接入新版 Shell API、V4 会话消息、声明式预设与
 profile 设置；旧受支持版本保留兼容路径。迁移说明见[配置参考](docs/configuration.md)。
 
 DSH 0.1.7 的 `/settings` 使用 TUI 实际的 Loader 行 ID，也支持自定义 ID。
@@ -109,7 +110,15 @@ TUI 启动后会在后台检查新版本，不阻塞首帧。有更新时输入 
 | `dsh-tui safe` | 只读诊断、插件清单与修复指引；`safe --rescue` 创建干净的救援 profile |
 | `dsh-tui version` · `dsh-tui help` | 启动器与 profile 版本、用法；没装 dsh 时这两条也能用 |
 
-其余参数转发给 `dsh --profile dsh-tui`。安全模式：[安装与快速开始](docs/getting-started.md)。
+前置 DSH 选项（如 `--dump-config`、`--patch <路径>`）原样转发，
+其余参数交给 `dsh --profile dsh-tui` 中的应用。使用
+`dsh-tui -- --resume=sid-1 ./notes` 可将 `--resume=sid-1 ./notes` 作为字面提示词，
+不选择恢复会话或工作区。直接调用 DSH 时，使用
+`dsh --profile dsh-tui -- -- --resume=sid-1 ./notes`：第一个 `--` 属于 DSH，
+第二个属于应用。宿主选项可以放在字面提示词之前：
+`dsh-tui --patch ./overlay.yml -- --resume=sid-1` 会应用补丁，
+并将 `--resume=sid-1` 作为提示词发送，而不恢复该会话。
+安全模式：[安装与快速开始](docs/getting-started.md)。
 
 ### 迁移其他编程代理的对话（`dsh-tui migrate`）
 
@@ -123,7 +132,8 @@ dsh-tui migrate codex --dry-run  # 只预览将落盘的内容，不写入
 
 - **只读源**：迁移只读取源代理的本地存储，绝不修改；产物经官方 `JsonlSessionPersistence` 后端写入 `$DSH_HOME/sessions`——导入的会话是一等公民（可打开、可续聊）
 - **幂等**：同一源对话命中同一确定性 UUID——重复导入跳过已存在项，不堆叠重复
-- **保留结构**：用户/助手消息与思考过程（reasoning）按轮次还原；工具调用流量不迁移（源格式不可忠实回放——迁移契约是「重读对话」而非「续跑任务」）
+- **保留结构**：按轮次还原用户/助手消息、思考过程（reasoning）、工具调用及其结果，以及源里的上下文压缩（写为原生压缩检查点）；harness 注入的机器文本不开轮。导入的会话可以直接接着做事
+TUI 内浏览：会话管理界面（`/resume`）为每个有会话的代理显示一个标签，选中一条即只导入这一条并直接打开。
 TUI 内：`/migrate`（或 `/migrate <agent> [--dry-run]`）以子进程运行同一导入，经通知流汇报，不卡界面。
 CLI 形态：任意终端运行 `dsh-tui migrate ...`，与 TUI 内执行同一套导入。
 完整指南：[会话迁移](docs/migrate.md)。
@@ -139,6 +149,8 @@ CLI 形态：任意终端运行 `dsh-tui migrate ...`，与 TUI 内执行同一�
 模型工作时：`Enter` 加塞、`Tab` 排队、`Ctrl+Enter` 打断并立即发送。
 
 鼠标（全屏）：拖选即复制、双击/三击选词选行、点工具卡、时间轴刻度与 `[Image #N]` 预览。
+
+**粘贴**：终端原生与 bracketed paste 保留普通文本与换行，粘贴内容到达时不会被误当 `Enter` 提交。Windows 终端以 win32-input-mode 键记录投递粘贴时，记录残留会在入口被整体剥离（多行粘贴不再留下零散 `_`），粘贴的 CRLF 折叠为单个换行；普通文本中的真实下划线与 bracketed paste 内容不受影响。
 
 完整参考：[交互与命令](docs/interaction.md)。
 
@@ -170,10 +182,11 @@ TUI 只负责交互与呈现：会话日志是唯一事实源，模型、工具�
 ## 已知限制
 
 - 注入的插件上下文没有独立展示，计入上下文分段。
-- `/model` 靠 fork 切换会话；旧会话留在 `/resume`。
+- `/model` 靠 fork 切换会话；旧会话留在 `/resume`（还没人说过话的会话不记分支，换完模型第一个 prompt 仍能自动生成标题）。
 - `Ctrl+V` 需要平台剪贴板工具；不支持的位图格式直接拒绝。
 - 后台会话活在本进程内，TUI 退出即停止。
 - `/thinking` 不持久化；`/compact` 在 `minimal` 预设下不可用；`/update` 需 `dsh --profile` 启动，回合运行中会被拒绝。
+- 状态栏 `≈¥` 与 `/cost` 是本会话估算：包含子代理用量，按各自模型 × 峰值/空闲 × 缓存分项计价；非官方/未收录模型只显示 token 并标注未计价。**估算仅供参考，以平台账单为准。**
 
 完整清单见[架构与限制](docs/architecture.md)。
 

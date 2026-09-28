@@ -167,6 +167,7 @@ jobs:
             vendor/dsh-std/packages/command/lib/
             vendor/dsh-std/packages/storage/lib/
             vendor/dsh-std/packages/messages/lib/
+            vendor/mathjax-tex-svg/lib/
 
   # 构建门禁：verify:build 聚合链（边界/契约/patch surface/plugin 系列等
   # 40 余项）+ 包内容与入口 smoke。与测试组并行，复用 build 的产物；此前
@@ -232,11 +233,11 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      # deepseek-ai/deepseek-harness tag dsh-v0.1.7-rc.2
+      # deepseek-ai/deepseek-harness tag dsh-v0.2.0-rc.1
       - uses: actions/checkout@v7
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: 477b4f420553e8a52c2fbccc464d7561b239c443
+          ref: 4878cdabd87d4041bdaff61d04c966883b9fd07a
           path: .upstream/deepseek-harness
           fetch-depth: 1
           persist-credentials: false
@@ -585,6 +586,18 @@ jobs:
 
       - name: Smoke-import compiled entry
         run: node -e "import('./lib/types/index.js').then(() => console.log('entry import ok')).catch(e => { console.error(e); process.exit(1) })"
+
+      # Regression for the macOS Unix-domain socket path limit.
+      # Force an intentionally long TMPDIR: before the Darwin-specific
+      # short-temp-root fix, verify-inject-channel would derive its fake HOME
+      # from this path and eventually fail with EINVAL while binding the socket.
+      - name: Injection channel with long macOS TMPDIR
+        if: runner.os == 'macOS'
+        run: |
+          LONG_TMPDIR="/tmp/dsh-tui-ci-$(printf 'x%.0s' {1..70})"
+          mkdir -p "$LONG_TMPDIR"
+          TMPDIR="$LONG_TMPDIR" \
+            node --import tsx/esm scripts/verify-inject-channel.mjs
 
       # 安全模式的启动器门禁在观察档里也跑一遍：脚本自带 POSIX/Windows 两套
       # dsh 替身，本就不依赖 lib/ 产物。放进这里的理由是 required 的

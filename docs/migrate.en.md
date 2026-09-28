@@ -31,11 +31,11 @@ row. Both entry points share the same import logic and idempotency rules.
 
 | Source | Local store | Notes |
 | --- | --- | --- |
-| `claude-code` | `~/.claude/projects/` | Thinking traces are preserved per turn |
-| `codex` | `~/.codex/sessions/` | Model id carried forward from `turn_context`; encrypted reasoning stays unreadable and is not migrated |
-| `omp` | `~/.omp/agent/sessions/` | DSH-lineage store, a near-direct mapping |
-| `zcode` | `~/.zcode/v2/sessions/` | Single-JSON-object format; role/timestamps/cwd all present |
-| `grok-build` | `~/.grok/sessions/` (relocatable via `GROK_HOME`) | Reasoning sibling rows attach to the assistant turn that follows; `synthetic_reason` injected rows (system reminders, …) are not migrated |
+| `claude-code` | `~/.claude/projects/` | Lines split from one response (sharing `message.id`) merge into one step; thinking, tool calls and results, compaction summaries, `/rename` and generated titles all migrate; `isMeta` context joins the next step; `subagents/` and auxiliary transcripts are not sessions |
+| `codex` | `~/.codex/sessions/` | Tool calls with all three output shapes, reasoning summaries (the readable part), `compacted` summaries, interrupted turns and sub-agent reports migrate; the model is recorded per step from `turn_context`; injected blocks and sub-agent rollouts do not |
+| `omp` | `~/.omp/agent/sessions/` | DSH-lineage store, a near-direct mapping (text and thinking) |
+| `zcode` | `~/.zcode/v2/sessions/` | Single-JSON-object format; only user/assistant text is mapped, `meta.title` becomes the title |
+| `grok-build` | `~/.grok/sessions/` (relocatable via `GROK_HOME`) | Reasoning rows attach to the assistant step that follows; tool calls and results (images as placeholders), compaction summaries, interrupted turns and the `session_summary` title migrate; `<user_query>` and similar wrappers keep only the body; synthetic rows and `<user_info>` do not migrate |
 
 ## Behavior contract
 
@@ -47,13 +47,38 @@ row. Both entry points share the same import logic and idempotency rules.
   Re-importing skips what is already present instead of stacking duplicates
   or rewriting existing logs. Both entry points derive identical session ids
   from the same source data.
-- **Structure preserved**: user/assistant messages and thinking traces are
-  rebuilt turn by turn; multiple assistant messages inside one turn each get
-  their own step.
-- **Not migrated**: tool traffic (source formats cannot replay it faithfully
-  — the contract is "re-read the conversation", not "resume the task"); and
-  per-message original timestamps (event times are import-time; the session
-  start keeps the source record).
+- **Structure preserved**: rebuilt turn by turn, one step per model call in
+  the source: thinking, text, tool calls and their results sit in the step
+  that produced them, so an imported session can pick the work straight up.
+- **Wire-legal tool traffic**: each result pairs back by call id to the step
+  that made the call (never to the newest step), in call order within the
+  step; an unanswered call gets an empty result, a result with no call is
+  dropped and counted, and a call id reused across steps is renamed. On
+  resume every tool_call is followed by its tool message. One result keeps
+  at most 64KB (the rest is cut and noted); images always become an
+  `[image]` placeholder.
+- **Compaction checkpoints**: a context-compaction boundary in the source is
+  written as the same native compaction transaction `/compact` produces. The
+  raw events stay in the log; the model sees "summary + what followed", the
+  context the source agent itself continued with.
+- **Injection filtering**: machine text a harness writes into the user role
+  (environment blocks, AGENTS.md instructions, system reminders, local-command
+  echoes) opens no turn and never titles a session; `<user_query>`, pasted
+  envelopes and similar wrappers keep only their body. Model-visible machine
+  context mid-turn (Claude's `isMeta`, Codex sub-agent reports) is kept as
+  the next step's input.
+- **Titles**: a title the source owns (`/rename`, generated titles,
+  `session_summary`, `meta.title`) is written as `session/title`; without
+  one the first real prompt serves as a fallback but is not written, so DSH
+  derives it from the first user message itself. Titles are collapsed to one
+  line and capped at 80 characters.
+- **Ready to continue**: like a native session, an imported log reserves an
+  empty system head in its first step; on resume the system prompt replaces
+  it instead of landing after the imported history.
+- **Not migrated**: per-message original timestamps (event times are
+  import-time; the session start keeps the source record); the encrypted
+  part of Codex reasoning; Grok's provider-side tools
+  (`backend_tool_call`).
 - **Robustness**: malformed lines, legal JSON `null` (whole-line or nested),
   and files over 64MB are skipped safely; one failed conversation never
   aborts the batch — failures are listed and reported with exit code 1.
@@ -72,6 +97,18 @@ Browse afterwards with `/resume`: sessions land in per-cwd directories
 (named by the official encoding rules); titles and start times are readable;
 conversations with thinking render as collapsible reasoning blocks in the
 TUI.
+
+## Source tabs on the session screen
+
+When you do not want a bulk import, browse by source on the session screen
+(`/resume`, `/home`, `/agentview`): the title row shows a tab for every source
+with conversations, and selecting one **imports just that conversation** and
+opens it.
+
+- Parsing is exactly `/migrate`'s, and the session id is derived from the source conversation the same way: both entries land a conversation on the same DSH session, and one already imported simply opens.
+- Opening the session screen only checks whether each source has any conversation (each source's walk stops at its first candidate); a source's list is read when its tab is opened, from a summary scan (file heads/tails only). Within one run an unchanged conversation is not read again; no cache file is written.
+- A conversation whose working directory no longer exists is not imported; the screen says so, and `/migrate` still imports it in bulk.
+- The tabs do not change how `/migrate` or `dsh-tui migrate` behave.
 
 ## Smart migration hint
 
@@ -101,17 +138,29 @@ with that source pre-checked; any other key dismisses it.
 
 ## Design notes (for maintainers and contributors)
 
-- Titles do not enter artifacts: the pipeline's sessionize step does not
-  consume the title field (current behavior across all five sources).
+- Parsing is separate from IO: `adapters/<source>.parse.ts` are pure
+  functions (raw text → turn model) over shared rules in `parse/` (jsonl
+  bad-line counting, injection recognition and unwrapping, title
+  normalization, tool-call pairing); adapters only discover files. OMP still
+  produces a role list, folded into turns mechanically by `fromRoleTurns`.
 - grok's `synthetic_reason` filter: only default and explicitly `human`
-  user rows migrate.
-- Timestamp boundary: grok rows carry no per-row time; turns inherit the
-  `summary.json` clock.
+  user rows migrate; the summary row among `compaction_meta` becomes a
+  compaction checkpoint.
+- Claude's legacy (2.0.x) `summary` record is a one-line leaf title at the
+  head of a file: it is treated as a title, not a compaction boundary.
+- Codex `custom_tool_call` input is free-form (a patch, a JS snippet); it
+  migrates wrapped as `{"input": …}` so call arguments stay JSON.
+- zcode: no sample with tool traffic or reasoning has been available, so
+  only the text roles are mapped and no field is guessed at.
+- Timestamp boundary: grok rows carry no per-row time; the session start
+  comes from `summary.json`.
 - Terminology: "migrate" here means this feature; it is unrelated to the
   package-rename migration from `dsh-cc-tui` (see
   [Getting started](getting-started.en.md)).
 
 Implementation and verification live in `src/dsh-adapter/migrate/`,
-`scripts/verify-migrate.mjs` (48 checks, all against the official read chain)
-and `scripts/verify-migrate-command.tsx` (the `/migrate` interaction
+`scripts/verify-migrate-parse.mjs` (per-source parsing rules over synthetic
+fixtures), `scripts/verify-migrate.mjs` (event synthesis and the round trip
+through the official read chain, wire legality and compaction checkpoints
+included) and `scripts/verify-migrate-command.tsx` (the `/migrate` interaction
 regression, mounted against the real Chat screen).

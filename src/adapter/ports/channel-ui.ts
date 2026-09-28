@@ -1,8 +1,8 @@
 /** Host-owned in-process Channel contract. No runtime or upstream imports. */
-import type { ChatRow, AgentStatus, TokenUsage, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, ChannelSelection } from './channel-view.js'
-import type { SpinnerMode, ToolBackground, ScrollGutterMode, PageMarginSetting, StatusBarConfig, SessionModeSpec } from './channel-display.js'
+import type { ChatRow, AgentStatus, TokenUsage, SessionCostByModel, SubagentCostEntry, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, ChannelSelection, CompactionStatus } from './channel-view.js'
+import type { SpinnerMode, ToolBackground, ScrollGutterMode, PageMarginSetting, StatusBarConfig, SessionModeSpec, SplashFontSetting } from './channel-display.js'
 import type { LocalCommand, CommandCompletion, BalanceResult, FileCandidate, RecapOutcome } from './channel-catalog.js'
-import type { TuiRewindMode, SessionTreeData, SessionSummary, PreviewEntry } from './channel-session.js'
+import type { TuiRewindMode, SessionTreeData, SessionSummary, PreviewEntry, ForeignSource, ForeignSessionRow, ForeignImportOutcome } from './channel-session.js'
 import type { TuiWorkspaceTarget, TuiWorkspaceCommand, TuiWorkspaceCommandResult, TuiWorkspaceEntry } from './channel-workspace.js'
 import type { ProviderSetupHost, OAuthProviderStatus, SettingsHost, TuiSettingsSection } from './channel-settings.js'
 
@@ -59,6 +59,11 @@ export interface ChannelUi {
   readonly configuredLang: string | undefined
   /** Running token totals across the session's assistant messages. */
   readonly tokens: TokenUsage
+  /** 本会话主会话用量按模型分桶（费用估算输入）。与 `tokens` 并行累计，
+   *  既有 `tokens` 语义与显示不变；会话中途换模型时历史用量留在原模型桶。 */
+  readonly mainCost: SessionCostByModel
+  /** 子代理 durable 用量按 (provider, model) 分桶快照（费用估算输入）。 */
+  readonly subagentCost: readonly SubagentCostEntry[]
   /** Working directory of the session. */
   readonly cwd: string
   /** Human-facing cwd (remote POSIX path/URI instead of a host alias). */
@@ -67,6 +72,12 @@ export interface ChannelUi {
   readonly gitBranch: string | undefined
   /** True between turn/start and turn/end — drives the working spinner. */
   readonly working: boolean
+  /** In-flight compaction of this session's history, or undefined when none
+   *  is running (see {@link CompactionStatus}). Required-and-undefined rather
+   *  than optional: the effect inventory maps over `keyof ChannelUi`, and an
+   *  optional member widens that key union with `undefined`, which breaks the
+   *  `Record` constraint on the inventory itself. */
+  readonly compaction: CompactionStatus | undefined
   /** True while a user-requested abort (Ctrl+C/Esc interrupt) has not yet
    *  converged — no turn/start or turn/end has retired the aborted turn.
    *  Chat uses it so a repeated Ctrl+C during a stuck abort force-exits. */
@@ -139,8 +150,17 @@ export interface ChannelUi {
   readonly whale: boolean
   /** Idle whale behaviors switch (settings `dsh-tui.whaleIdle`). */
   readonly whaleIdle: boolean
+  /** Swap the header's pixel whale for the static maid portrait (settings
+   * `dsh-tui.whaleGirl`; off by default). */
+  readonly whaleGirl: boolean
   /** Apply an idle-whale-behavior change (see the public Channel type). */
   setWhaleIdle(enabled: boolean): void
+  /** Big-text face on the header splash (settings `dsh-tui.splashFont`):
+   *  `daily` (the default) rotates by local date, any other id pins that one
+   *  face — see `components/splashFonts.ts` for the registry. */
+  readonly splashFont: SplashFontSetting
+  /** Apply a maid-portrait change (see the public Channel type). */
+  setWhaleGirl(enabled: boolean): void
   /** Minimal mode (settings `dsh-tui.minimal`): no header splash, no emoji
    *  glyphs, no decorative colors; code highlight and tool colors stay. */
   readonly minimal: boolean
@@ -453,7 +473,18 @@ export interface ChannelUi {
   listFiles(): Promise<readonly string[]>
   /** Every session the persistence backend stores, classified and unfiltered
    *  — the browser (`/resume`) decides which of them a given view shows. */
-  listSessions(onEnriched?: (summary: SessionSummary) => void): Promise<readonly SessionSummary[]>
+  /** Last successful source-scoped listing for first paint; never authoritative. */
+  cachedSessions(): readonly SessionSummary[] | undefined
+  listSessions(onEnriched?: (summary: SessionSummary) => void, onPartial?: (rows: readonly SessionSummary[]) => void): Promise<readonly SessionSummary[]>
+  /** Other coding agents on this machine that have conversations (a cheap
+   *  presence probe; nothing is read or remembered). */
+  listForeignSources(): Promise<readonly ForeignSource[]>
+  /** One source's conversations, newest first; `onRow` streams rows as the
+   *  scan finds them. Unchanged conversations are not re-read within a run. */
+  listForeignSessions(agentId: string, onRow?: (row: ForeignSessionRow) => void): Promise<readonly ForeignSessionRow[]>
+  /** Import one foreign conversation unless already present; a repeat
+   *  request for a conversation being imported joins the running import. */
+  importForeignSession(agentId: string, key: string): Promise<ForeignImportOutcome>
   /** Trailing exchanges of a persisted session, for the browser's preview. */
   previewSession(sessionId: string): Promise<readonly PreviewEntry[]>
   /** Mark a session for `dsh-tui --resume` on the next launch. */
@@ -479,6 +510,10 @@ export interface ChannelUi {
   renameSessionTo(sessionId: string, title: string): Promise<boolean>
   /** Manually compact the session history (`/compact`); no-op notify when the leaf lacks a compaction service. */
   compact(): void
+  /** Abort an in-flight manual compaction (`Esc` while it runs). No-op when
+   *  none is running or the running one belongs to another process/host: only
+   *  this channel's own request carries an abort signal it may fire. */
+  cancelCompact(): void
   /** Render a multi-line local report in the transcript (`/status`,
    *  `/doctor`, …): a `local` row plus one `local-output` row per line. */
   pushLocal(title: string, lines: readonly string[]): void
@@ -571,5 +606,6 @@ export interface ChannelUi {
   setSmoothStreaming(enabled: boolean): void
   setStatusBar(config: Partial<StatusBarConfig>): void
   setWhale(visible: boolean): void
+  setSplashFont(setting: SplashFontSetting): void
   setMinimal(enabled: boolean): void
 }

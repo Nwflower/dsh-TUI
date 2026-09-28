@@ -10,10 +10,13 @@ export type SessionResetState = Pick<
   | 'sessionTitle'
   | 'sessionColor'
   | 'tokens'
+  | 'mainCost'
+  | 'subagentCost'
   | 'responseChars'
   | 'activeToolCount'
   | 'lastUserText'
   | 'working'
+  | 'compaction'
   | 'cancelPending'
   | 'spinnerMode'
   | 'tps'
@@ -53,10 +56,17 @@ export function resetSessionProjection(
     peak: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     idle: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   }
+  // 会话级费用累计与 tokens 同生命周期：换会话/换模型/rewind 一律清零后
+  // 由 replay 重建（模型切换的 replay 会按 request/header 还原各请求模型）。
+  state.mainCost = {}
+  state.subagentCost = []
   state.responseChars = 0
   state.activeToolCount = 0
   state.lastUserText = ''
   state.working = false
+  // The adoption path settles any in-flight compaction before it takes the
+  // new session over; a row that survived it would describe the old one.
+  state.compaction = undefined
   state.cancelPending = false
   state.spinnerMode = 'requesting'
   state.tps = undefined

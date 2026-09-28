@@ -22,7 +22,9 @@ import { readSessionOwners, type SessionMountOwner } from '../../sessionMounts.j
 import type { SessionSummary } from '../../dsh-adapter/sessions/index.js'
 import type { TuiWorkspaceEntry, TuiWorkspaceTarget } from '../../workspaces.js'
 import type { ChannelUi as Channel } from '../../adapter/channel/ui-policy.js'
-import { RAIL_CHROME_ROWS, WORKSPACE_ROW_LINES, RAIL_MIN_TOTAL_COLUMNS, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX, SESSION_ROW_LINES, SESSION_PANE_CHROME_ROWS, MenuAction, MENU_ACTIONS, MENU_WIDTH, MENU_HEIGHT, MENU_LABEL_KEYS, SupervisorLiveState, RailEntry, UNREGISTERED_RAIL_ID, message, samePath, sessionMatchesQuery } from './model.js'
+import type { ResumeResult } from '../../adapter/ports/channel-view.js'
+import { resumeFailureText } from '../../sessions/resumeFailure.js'
+import { RAIL_CHROME_ROWS, WORKSPACE_ROW_LINES, RAIL_MIN_TOTAL_COLUMNS, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX, SESSION_ROW_LINES, SESSION_PANE_CHROME_ROWS, noticeLines, MenuAction, MENU_ACTIONS, MENU_WIDTH, MENU_HEIGHT, MENU_LABEL_KEYS, SupervisorLiveState, RailEntry, UNREGISTERED_RAIL_ID, message, samePath, sessionMatchesQuery } from './model.js'
 
 /**
  * The last successful listing, per channel, carried across mounts of this
@@ -77,7 +79,7 @@ export interface SessionSupervisorInput {
   /** Home directory, for collapsing paths to `~`. */
   readonly home: string
   /** Mount a persisted session (the channel unified resume path). */
-  onOpenSession(sessionId: string): Promise<boolean>
+  onOpenSession(sessionId: string): Promise<ResumeResult>
   /** Start a fresh session in the workspace at `path`. */
   onNewSession(target: TuiWorkspaceTarget): Promise<boolean>
   /** Stop a background session of this terminal; false when it is not ours. */
@@ -98,12 +100,20 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
 
   const [entries, setEntries] = useState<readonly RailEntry[]>([])
   // Lazy so a non-empty snapshot from this channel's previous mount paints as
-  // the first frame; no or empty snapshot keeps today's loading path.
-  const [sessions, setSessions] = useState<readonly SessionSummary[]>(() => snapshotSlot(channel).rows ?? [])
+  // the first frame, including after restart; undefined alone means unknown.
+  const [sessions, setSessions] = useState<readonly SessionSummary[]>(() => {
+    const slot = snapshotSlot(channel)
+    // Recheck the provider's scope on every mount (including service replacement).
+    if (typeof channel.cachedSessions === 'function') {
+      try { slot.rows = channel.cachedSessions() } catch { slot.rows = undefined }
+    }
+    return slot.rows ?? []
+  })
   const [loading, setLoading] = useState(() => {
     const snapshot = snapshotSlot(channel).rows
-    return snapshot === undefined || snapshot.length === 0
+    return snapshot === undefined
   })
+  const [refreshing, setRefreshing] = useState(true)
   const [notice, setNotice] = useState<{ text: string; tone: 'info' | 'error' } | undefined>(undefined)
   /** Live status and occupancy are re-read on their own clock, not the listing's. */
   const [pulse, setPulse] = useState(0)
@@ -315,6 +325,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     // rows the newer listing has already corrected.
     const slot = snapshotSlot(channel)
     const generation = ++slot.requestGeneration
+    setRefreshing(true)
 
     // The two reads are independent, and the session listing is the half this
     // screen cannot work without: a registry that rejects (bare composition,
@@ -328,6 +339,12 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
             if (slot.requestGeneration !== generation) return
             slot.rows = slot.rows?.map(row => row.id === enriched.id ? enriched : row)
             setSessions(current => current.map(row => row.id === enriched.id ? enriched : row))
+          }, partial => {
+            // Keep a complete cached list over a partial cold scan. With no
+            // snapshot, show useful rows now rather than waiting for every log.
+            if (slot.requestGeneration !== generation || slot.rows !== undefined) return
+            setSessions(partial)
+            setLoading(false)
           })
           // Recorded only after success: a failed listing keeps the previous
           // snapshot, and only the newest reload may write it.
@@ -355,7 +372,10 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
         }
       })(),
     ])
-    if (slot.requestGeneration === generation) setLoading(false)
+    if (slot.requestGeneration === generation) {
+      setLoading(false)
+      setRefreshing(false)
+    }
   }, [channel])
 
   React.useEffect(() => {
@@ -510,9 +530,18 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
    * clipped the focused one out of the viewport.
    */
   const railEntryCapacity = Math.max(1, Math.floor(railListHeight / WORKSPACE_ROW_LINES))
+  /**
+   * The notice wraps (a mount refusal carries the adapter's full error), and
+   * every row it takes beyond its reserved one comes out of the list window —
+   * otherwise the list would overflow and clip the focused row instead.
+   */
+  // Wrapped to the VISIBLE width: below 20 columns the pane keeps its 20-cell
+  // floor and the renderer clips at the terminal edge, which would cut every
+  // notice row short of the reason it carries.
+  const noticeRows = noticeLines(notice?.text, Math.max(0, Math.min(sessionWidth, columns) - 3))
   const sessionListHeight = Math.max(
     SESSION_ROW_LINES,
-    rows - SESSION_PANE_CHROME_ROWS,
+    rows - SESSION_PANE_CHROME_ROWS - (noticeRows.length - 1),
   )
 
   const report = useCallback((text: string, tone: 'info' | 'error'): void => {
@@ -551,13 +580,15 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     }
     setNotice(undefined)
     void onOpenSession(session.id)
-      .then((ok) => {
-        // The host owns the REASON: it is the layer that saw the mount result
-        // (Chat renders the real refusal through `resumeFailureText` and a
-        // notification). This screen only names WHICH session could not be
-        // entered — a notice that restated the generic failure would compete
-        // with, and read worse than, the host's own sentence.
-        if (!ok) report(t('supervisor-open-failed', { name: session.title.text }), 'error')
+      .then((result) => {
+        // The reason is shown HERE, not in a channel notification: this
+        // screen replaces the conversation, so the composer that draws
+        // notifications is not mounted and a "see below" pointer led nowhere.
+        // `cancelled` stays silent (the user or a rival switch asked for it).
+        // A plain failure shows the bare error: "Could not enter" already says
+        // resuming failed, and the rows it would repeat are the error's own.
+        const reason = !result.ok && result.reason === 'failed' ? result.error : resumeFailureText(result)
+        if (reason !== undefined) report(t('supervisor-open-failed', { name: session.title.text, reason }), 'error')
       })
       .catch(error => report(t('session-resume-failed', { err: message(error) }), 'error'))
   }, [holderOf, onOpenSession, report])
@@ -670,6 +701,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     entries,
     sessions,
     loading,
+    refreshing,
     notice,
     setNotice,
     query,
@@ -706,6 +738,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     sessionWidth,
     railEntryCapacity,
     sessionListHeight,
+    noticeRows,
     persistPin,
     selectEntry,
     openSession,

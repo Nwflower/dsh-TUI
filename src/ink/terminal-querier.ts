@@ -285,6 +285,12 @@ export class TerminalQuerier {
   }
 
   /**
+   * Receives responses that answer no pending query — e.g. a Kitty graphics
+   * error for a placement command sent without suppressing failures.
+   */
+  onUnsolicited: ((r: TerminalResponse) => void) | undefined = undefined
+
+  /**
    * Dispatch a response parsed from stdin. Called by App.tsx's
    * processKeysInBatch for every `kind: 'response'` item.
    *
@@ -300,7 +306,8 @@ export class TerminalQuerier {
    *   and signal its flush() completion. Only draining up to the first
    *   sentinel keeps later batches intact when multiple callers have
    *   concurrent queries in flight.
-   * - Unsolicited responses (no match, no sentinel) are silently dropped.
+   * - Unsolicited responses (no match, no sentinel) go to
+   *   {@link onUnsolicited} when set, and are dropped otherwise.
    * @param r - the response parsed from stdin.
    */
   onResponse(r: TerminalResponse): void {
@@ -317,13 +324,18 @@ export class TerminalQuerier {
 
     if (r.type === 'da1') {
       const s = this.queue.findIndex(p => p.kind === 'sentinel')
-      if (s === -1) return
+      if (s === -1) {
+        this.onUnsolicited?.(r)
+        return
+      }
       for (const p of this.queue.splice(0, s + 1)) {
         if (p.kind === 'query') p.resolve(undefined)
         else p.resolve(r)
         p.releaseRawMode()
       }
+      return
     }
+    this.onUnsolicited?.(r)
   }
 
   /**

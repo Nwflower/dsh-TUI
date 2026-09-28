@@ -30,7 +30,7 @@ dsh-tui
 - `dsh-tui safe`: safe mode — read-only environment view, lists profile plugins, suggests fixes, and can create a clean rescue profile (see §5.5).
 - `dsh --profile dsh-tui`: manual launch, equivalent to `dsh-tui` (`/update` only works this way).
 - Running a model needs `DEEPSEEK_API_KEY`. Run `/doctor` to check the environment.
-- Primary verified dsh engine version: `0.1.7-rc.2`. See `ADAPTER.md` for compatibility lines; versions outside that list show a drift note and the command to align on the logo page.
+- Primary verified dsh engine version: `0.2.0-rc.1`. See `ADAPTER.md` for compatibility lines; versions outside that list show a drift note and the command to align on the logo page.
 - If the logo page shows a ⚠ version-drift warning, align the dsh engine:
   `npm i -g @deepseek-ai/dsh@<版本>`
 
@@ -38,7 +38,7 @@ dsh-tui
 
 1. **Pixel whale header** (~3.4 s intro animation, then frozen): `✦ dsh-TUI` version,
    `DEEPSEEK / HARNESS` big text, current model and effort, working directory, and a
-   **startup hint** (`/model` · `/help` · `Tab`). Hidden below 64 columns.
+   **startup hint** (`/model` · `/help` · `Tab`). Narrow terminals climb down a ladder (see 5.1).
    When the dsh engine is out of the verified range, a **⚠ version-drift warning**
    appears with the align command.
 2. **Bottom status bar**: working-status row, context bar, TPS gauge, and other live
@@ -127,6 +127,7 @@ Unrecognized keys are ignored, `Esc` does nothing, clear with `Ctrl+C`/`dd`.
 | `Shift+Tab` | cycle session mode (default → plan → full access); mounted third-party permission presets follow in registry order at the end of the cycle |
 | `Shift+↑` | message selection mode (`↑/↓` move, `Enter` expand one, `Esc` exit) |
 | `Ctrl+T` (⌘T) | open the trace scene (same as `/trace`) |
+| `Alt+S` | one-key star (same as `/star`; the splash's star line is clickable too). Remappable in `/settings`; a short "the whale girl catches the star" celebration plays on success. Replay it any time with `DSH_TUI_STAR_MODAL=1 dsh-tui`; preview the splash star line with `DSH_TUI_STAR_LINE=1 dsh-tui` (preview env vars, ledger untouched) |
 
 ### 2.6 Mouse (fullscreen mode; drag/double-click/triple-click select-and-copy)
 
@@ -161,7 +162,9 @@ Unrecognized keys are ignored, `Esc` does nothing, clear with `Ctrl+C`/`dd`.
 - Layout: left workspace column, right session column; ≥84 columns side-by-side, narrower hides the workspace column.
 - Switch column `←/→`; move `↑/↓`/`PgUp`/`PgDn`; **typing = live filter** (by title/dir/branch/model).
 - Enter `Enter` (row 0 = new session in that workspace); new `Ctrl+Enter`/`Ctrl+N`; stop background session `Ctrl+X`.
-- `Ctrl+L` reload · `Shift+Tab` open action menu · `Esc` close hint → clear filter → leave.
+- `Ctrl+L` reload · `Enter` on the rail opens the action menu · `Esc` close hint → clear filter → leave.
+- Source tabs: when Claude Code / Codex / Grok Build / zcode have conversations on this machine, tabs appear on the right of the title row; switch with `Tab`/`Shift+Tab` or a click.
+  On a source tab `Enter`/click imports just that conversation and opens it (one imported before opens directly); a missing working directory is reported and nothing is imported; `Ctrl+L` rescans the source.
 - Mouse: click a session row = enter, click `★`/`☆` = toggle pin only, right-click a workspace row = action menu.
 - Empty input + `←` (or `/bg`) = send to background and open this screen, session keeps running.
 
@@ -248,8 +251,8 @@ The command menu = built-in commands (50) + DSH registry commands (`/plan` `/goa
 |---|---|---|
 | `/context` | none | loaded-context detail (instructions/runtime context/skills/tools etc.) |
 | `/status` | none | model+effort, working/idle, session id, dir+git branch, token, cache hit rate, context percentage, session title |
-| `/cost` | none | token usage + cache hit rate (DSH provides no cost metering) |
-| `/balance` | none | DeepSeek official account balance (free read-only API): summary line + hover detail, click refresh, `×` close |
+| `/cost` | none | token usage + cache hit rate + a session estimate (subagent usage included) split into main/subagent; unofficial or unlisted models show tokens only and are marked unpriced (**an estimate — the platform bill is authoritative**) |
+| `/balance` | none | DeepSeek official account balance (free read-only API): summary line + hover detail (same session-estimate split: main/subagent/unpriced), click refresh, `×` close |
 | `/config` | none | config sources: `cordis.patch.yml` path, launch method, model routing |
 | `/doctor` | none | environment check |
 | `/migrate` | `[agent] [--dry-run]` | import conversation history from other coding agents (claude-code/codex/omp/zcode/grok-build); runs in a child process — see [Session migration](migrate.en.md) |
@@ -263,7 +266,7 @@ The command menu = built-in commands (50) + DSH registry commands (`/plan` `/goa
 
 | Command | Args | Effect |
 |---|---|---|
-| `/model` | none | model selector; **switching = fork the session** (history kept, only routing changes), choice persisted to `~/.dsh-tui/model.json` |
+| `/model` | none | model selector; **switching = fork the session** (history kept, only routing changes; a session nobody has typed into records no branch, keeping automatic titles for its first prompt), choice persisted to `~/.dsh-tui/model.json` |
 | `/effort` | `status` / `<id>` | reasoning effort: no-arg slider (`←/→` adjust); `status` current level; `<id>` set directly. Persisted to `~/.dsh-tui/effort.json`; new-session start level follows /settings `effortDefault` (§5.3) |
 | `/thinking` | none | extended-thinking display toggle (thinking expands item by item while streaming) |
 | `/tokens` | none | token usage + context percentage |
@@ -409,12 +412,21 @@ An empty session shows the whale logo area at the top (scrolls away with the con
 
 - **Intro animation** (~3.4 s, three picked each launch, `/deepseek` egg re-rolls): classic / heart / sleep.
 - **Welcome idle animation** (`whaleIdle`, default on): fin, blink, tail wag, sleeps with Z after 10 s idle; **click to show a heart and wake it**.
+- **Maid portrait** (`whaleGirl`, default off): swaps the header's pixel whale for the author-drawn maid — FIRST as a **real raster** through the terminal image protocols (Kitty/Sixel); terminals without graphics support fall back to the character-art maid. **Click her** and she turns into the "happy" portrait for a few seconds, then eases back on her own; the first agent task freezes her (no more reactions).
 - After the first agent task, it freezes to a static frame (`/new` re-enters the welcome period).
 - Text column right of the whale: `✦ dsh-TUI v版本号` →
-  `DEEPSEEK / HARNESS` big text → current model + effort → working directory → startup hint line.
+  `DEEPSEEK / HARNESS` big text (bold glyphs, both rows the same width, one blank row between) →
+  current model + effort → working directory → startup hint line.
+- The big-text face rotates by **local date** (eight faces: bold / square / bevel / wide / dot /
+  stencil / classic / slab): the same day always shows the same one, independent of launch time.
+  To keep one face, pick it in `/settings → Splash font` (`splashFont`) — choosing a specific face
+  pins it, choosing `Daily rotation` (the default) restores the rotation; it applies immediately.
 - Out of the verified range, a **⚠ version-drift warning** appears (with the align command).
 - Centered tagline under the whale: `探索未至之境！`.
-- The whale is hidden **below 64 columns**.
+- Narrow terminals climb down a ladder on the **content-area** width: **≥ 97 columns** whale + big
+  text; **55–96** the big text alone (the whale goes first); **40–54** the whale alone; **< 40** a
+  single plain `DeepSeek Harness` line. The thresholds follow the face width (97 columns is the
+  6-column faces; the widest, `wide`, needs 113, and the 5-column `classic`/`slab` fit at 96).
 - Pixel whale art and idle behavior ported from [dsh-ui-whale](https://github.com/lhh010/dsh-ui-whale) (author
   [@lhh010](https://github.com/lhh010)), with thanks.
 
@@ -436,8 +448,10 @@ An empty session shows the whale logo area at the top (scrolls away with the con
 
 **Row 2 — status field row** (each field toggled separately, see `/settings`)
 - left group: model → TPS → thinking → mode → ctx → cache hit rate → tokens (`1.2k→340` input→output) →
-  cost (`≈¥0.05 谷`, **an estimate, the platform bill is authoritative**,
-  official models only)
+  cost (`≈¥0.05 谷`, **a session estimate** that includes subagent usage, priced per
+  each agent's model × peak/idle × cache components; hover splits main ¥ / subagent ¥ / unpriced N tok;
+  unofficial or unlisted models show tokens only and are marked unpriced;
+  **the platform bill is authoritative**)
 - right group: git branch → working directory (basename only in compact mode) → session title → short session ID (`#` + first 8 chars, for `--resume`)
 - `statusBar.compact` merges the two sides into one row.
 - Default on: compact, model, thinking, cwd, contextUsage, cache, cost, goal, contextBar.
@@ -465,12 +479,15 @@ Common items below, full list on the /settings screen:
 | terminalImages | terminal image preview (default on, needs terminal support); takes effect after `/restart`. Off shows text only and skips preview decode, sending images to the model is unaffected |
 | whale | pixel whale header (default on); three intro animations picked per launch (classic/heart/sleep), `/deepseek` egg re-rolls |
 | whaleIdle | whale welcome idle animation (default on): fin/tail/blink, sleeps with Z after 10 s idle; click for a heart. Freezes after the first task |
+| splashFont | big-text face on the header splash: Daily rotation (default, changes with the local date) / bold / square / bevel / wide / dot matrix / stencil / thin (classic) / slab. Picking a face pins it; picking Daily rotation restores the rotation. Applies immediately |
+| whaleGirl | maid portrait (default off): swaps the header's pixel whale for the author-drawn maid as a **real raster** (Kitty/Sixel); falls back to the pixel whale without graphics support |
 | diffLayout | Edit/Write diff layout: auto (two columns ≥110 cols) / split / unified |
 | thinkingFold | thinking block: preview (2-3 line preview + folded when settled) / full (expanded to end of turn) |
 | effortDefault | default reasoning effort: auto / off / low / high / max. Start level for new sessions (details below) |
 | smoothStreaming | smooth streaming output (default on): replies/thinking/tool-card text reveal at ~30fps; replay/history always direct |
 | toolBackground | tool-card background emphasis: none / subtle / strong |
 | mermaidDiagrams | Mermaid diagrams (default on): ```` ```mermaid ```` blocks render as character diagrams, forming while streaming; too-wide or unsupported types keep source with the required columns. Applies immediately |
+| mathRendering | LaTeX math (default `auto`): how `$…$` / `\(…\)` inline and `$$…$$` / `\[…\]` / bare display-environment (`\begin{align}` …) block formulas in replies show. `auto` uses the best available renderer (today Unicode text, with fractions and limits stacked in blocks), `image` typesets formulas with MathJax as terminal images in terminals with graphics support (Kitty, Ghostty, WezTerm, iTerm2…), in the theme's text color (block formulas up to 16 rows; inline formulas as one-row images when a single row can hold them legibly; still-streaming formulas, dimmed thinking, terminals without graphics, formulas too small on one row, and any render failure fall back to Unicode), `unicode` pins Unicode text, `source` keeps the TeX. Unsupported, still-streaming, or too-wide formulas keep their source (a too-wide block first falls back to one line). Prices (`$5`), shell variables (`$HOME`), and `$` in code are left alone. The older `latexMath: false` still means `source`. Applies immediately |
 | scrollGutter | transcript gutter: timeline (turn timeline, default) / scrollbar (proportional) / hidden. Applies immediately |
 | pageMargin | page margin: inset from all four terminal edges. Presets none / slim / normal (default) / roomy, or custom `NxM` (details below). Applies immediately |
 | foldTerminalCommand | fold terminal commands (default off): multi-line commands on terminal cards (Bash/PowerShell) fold to first line + count; `Ctrl+O` or click to expand |

@@ -280,6 +280,31 @@ export interface TokenBucket {
   cacheWrite: number
 }
 
+/** 一个模型的峰谷计价桶（与 {@link TokenUsage} 的 peak/idle 同构）。 */
+export interface CostTokenBuckets {
+  peak: TokenBucket
+  idle: TokenBucket
+}
+
+/**
+ * 本会话主会话用量按模型分桶（费用估算输入，见 estimateCostFromBucketsCny）。
+ * `channel.tokens` 的语义与既有显示不变；本字段只服务计价，会话中途换模型时
+ * 历史用量留在原模型桶，不会被新模型重估。
+ */
+export interface SessionCostByModel {
+  [model: string]: CostTokenBuckets
+}
+
+/**
+ * 子代理 durable 用量按 (provider, model) 分桶——子代理各自模型不同，价格
+ * 也就不同；未计价判定由计价纯函数按 provider/model 完成。
+ */
+export interface SubagentCostEntry {
+  provider: string
+  model: string
+  buckets: CostTokenBuckets
+}
+
 /** A transient status message shown above the prompt input. */
 export interface NotificationItem {
   id: number
@@ -289,6 +314,28 @@ export interface NotificationItem {
   /** Auto-dismiss after this many ms (default 4000); 0 = sticky, removed
    *  only through the early-dismiss handle. */
   timeoutMs: number
+}
+
+/**
+ * The session's in-flight compaction (`/compact`, or the automatic pressure
+ * compaction at a turn boundary), as the status row above the prompt renders
+ * it. The host exposes no proportional progress: a compaction is one model
+ * call between two durable session events, so this carries only what is
+ * observable — when the bracket opened, whether that call has started
+ * producing output, how much it has produced, and whether this process may
+ * abort it.
+ */
+export interface CompactionStatus {
+  /** Wall-clock ms when the compaction bracket opened. */
+  readonly startedAt: number
+  /** `prefill` until the summarizer's first output chunk: replaying the
+   *  conversation prefix is a long silent phase with nothing to count.
+   *  `summary` once output is streaming. */
+  readonly phase: 'prefill' | 'summary'
+  /** Output chars streamed by the compaction model call (see `phase`). */
+  readonly outputChars: number
+  /** True only for a compaction this process started, so only it may abort. */
+  readonly cancellable: boolean
 }
 
 /**

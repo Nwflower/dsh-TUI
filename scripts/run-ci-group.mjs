@@ -114,6 +114,20 @@ const GROUPS = {
 // （实测 ~73 LF/s）。静置窗口内 stdout 不得出现 LF、回滚缓冲不得增长，同时
 // 鲸鱼闲置动画必须仍在重绘（不许靠冻结界面取巧）。
     ["verify-idle-repaint", ['node', '--import', 'tsx/esm', 'scripts/verify-idle-repaint.tsx']],
+// 开屏头部契约：大字 5 行高且等宽（8×7 = 7×8）、bigTextWidth 与实际画出的列数
+// 一致；窄终端按「鲸鱼+大字 → 纯大字 → 纯鲸鱼 → 纯文字」逐档降级，档位无空档。
+    ["verify-splash-layout", ['node', '--import', 'tsx/esm', 'scripts/verify-splash-layout.ts']],
+// 开屏彩蛋契约：节日换词（每款字体都要有 HAPPINESS/MERRY/NEW YEAR 的全部字形，
+// 两行等宽 + 下排居中取最紧解）与 1/20 的求 star 标语（OSC 8 成对 + URL 正确、
+// 缩进按该行实际宽度重算、不支持超链接时退化成纯文本 URL），并挂真实 LogoV2 读屏。
+    ["verify-splash-eggs", ['node', '--import', 'tsx/esm', 'scripts/verify-splash-eggs.tsx']],
+    // 求 star 的触发条件（累计启动次数 / 累计在线时长的里程碑阶梯、账本坏文件兜底）：
+    ["verify-usage-stats", ['node', '--import', 'tsx/esm', 'scripts/verify-usage-stats.mjs']],
+    // 一键 star 的 gh 集成（探测/登录态/超时/失败分类，全用假执行器不联网）：
+    ["verify-star-action", ['node', '--import', 'tsx/esm', 'scripts/verify-star-action.mjs']],
+    // 女仆娘立绘（whaleGirl 设置 + 头部换画/阶梯契约）与 99h/999 次"求 star"
+    // 开屏弹窗（挂真实 Chat：弹一次/记账/Esc 关且关后不抢键/忙时不弹不记账）：
+    ["verify-whale-girl", ['node', '--import', 'tsx/esm', 'scripts/verify-whale-girl.tsx']],
 // settled 子代理卡片不得永久持有动画时钟（空闲帧归零回归）：
 // 曾以 120ms/卡片持续驱动 React commit，N 张相位错开合成 ~30ms
 // 均匀帧 cadence。
@@ -205,6 +219,11 @@ const GROUPS = {
 // Uc 优先、代理对与 keyup 交错、Rc 重复展开、conhost 拆散粘贴重组、
 // Alt+numpad 两轮合成。
     ["verify-win32-input", ['node', '--import', 'tsx/esm', 'scripts/verify-win32-input.tsx']],
+// 粘贴记录残留清洗回归（issue #1090）：win32 记录残留（带 ESC 的完整形态
+// 与记录拆散后无 ESC 的尾部形态）必须在入口整体剥离、不留下 `_`；真实
+// 下划线、仅形似的方括号文本、普通 bracketed paste 与既有 ANSI/CRLF
+// 归一化零误伤。
+    ["verify-paste-residue", ['node', '--import', 'tsx/esm', 'scripts/verify-paste-residue.tsx']],
 // win32 协议重组回归：conhost 把 SGR/X10 鼠标报告与终端回复（DA1 等）
 // 合成成逐字符 CSI Vk;Sc;Uc;Kd;Cs;Rc 记录时，必须跨块重组回完整协议
 // 事件而不是逐键泄漏进输入框；截断的鼠标候选在 flush 时丢弃，单独
@@ -294,11 +313,18 @@ const GROUPS = {
   'session-workspace': [
 // 跨代理会话迁移回归（claude-code/codex/omp/zcode/grok-build → DSH sessions）：
 // 全程跑官方读取链——Session.append 生成骨架（turn 配对/reasoning/
-// provenance）、JsonlSessionPersistence 落盘、open+fromRestore+
-// deriveMessages 逐消息断言（CJK/emoji 无损）、restore 作 seed 续聊写回、
+// provenance/空 system head/工具调用/中断/标题/压缩检查点）、
+// JsonlSessionPersistence 落盘、open+fromRestore+deriveMessages 逐消息
+// 断言（CJK/emoji 无损、wire 合法）、restore 作 seed 续聊写回并替换 head、
 // uuid v5 幂等、五 adapter fixture 解析（含 sourceId 只取裸文件名）、
 // /migrate 命令分类矩阵。
     ["verify-migrate", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate.mjs']],
+// 迁移源解析层回归（纯函数、合成 fixture）：jsonl 坏行计数、注入识别与
+// 包装剥离、标题归一、工具调用配对，以及各源逐条解析规则。
+    ["verify-migrate-parse", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate-parse.mjs']],
+// 外部来源浏览层回归（临时目录合成 fixture）：扫描 IO（头尾窗口、异步遍历、
+// 指纹复用）、各源 scan()/load()、来源探测、catalog 快照、单会话导入。
+    ["verify-migrate-browse", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate-browse.mjs']],
 // /migrate 交互回归（挂真实 Chat）：fresh 会话直接 `/migrate <agent>` 必须
 // 打开确认层（旧实现查 picker 行缓存，缓存为空时一律报未知源）、未知源仍
 // 被拒、`--dry-run` 要源、多源报 usage、重开选择器清空上一轮勾选。
@@ -416,6 +442,10 @@ const GROUPS = {
 // 日志、标题来源判定、revision 命中/失效（钉住 revision 改写日志作
 // 判据）、索引自愈与剪枝、**终态等价**（增量索引 == 全新构建）。
     ["verify-session-index", ['node', 'scripts/verify-session-index.mjs']],
+// 真 JSONL 混合版本库：无关追加不重读旧会话摘要，文件改写/替换仍须失效。
+    ["verify-session-artifact-cache", ['node', 'scripts/verify-session-artifact-cache.mjs']],
+// 跨进程首屏快照：不等慢枚举、来源隔离、失败保留、空库清空与迟到守卫。
+    ["verify-session-list-snapshot", ['node', 'scripts/verify-session-list-snapshot.mjs']],
 // 空会话须完整读取后才能判定：截断/损坏、帧数上限、纯图片输入与旧缓存
 // 不得隐藏真实历史或进入清理名单；真实 JSONL 重开验证落盘后的可见性。
     ['verify-session-emptiness', ['node', '--import', 'tsx/esm', 'scripts/verify-session-emptiness.ts']],
@@ -511,6 +541,9 @@ const GROUPS = {
     ['verify-message-compat', ['node', 'scripts/verify-message-compat.mjs']],
     ['verify-settings-compat', ['node', '--import', 'tsx/esm', 'scripts/verify-settings-compat.mjs']],
     ["verify-compact", ['node', '--import', 'tsx/esm', 'scripts/verify-compact.mjs']],
+    ["verify-compaction-progress", ['node', '--import', 'tsx/esm', 'scripts/verify-compaction-progress.tsx']],
+// #1030：隔离 locale、持久化 /lang 与环境变量，不能靠 CI 的 zh 默认掩盖脚本依赖。
+    ['verify-regression-language', ['node', 'scripts/verify-regression-language.mjs']],
     ["verify-context-warning", ['node', '--import', 'tsx/esm', 'scripts/verify-context-warning.mjs']],
     ["verify-channel-goal-todo", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-goal-todo.mjs']],
 // IDE 选区通道回归（PR #562）：纯函数（env 直连/lock 扫描与 workspace
@@ -519,6 +552,10 @@ const GROUPS = {
 // 选区消费（text 优先/磁盘回退/截断计数/replay 指示回扫）。
     ["verify-ide-channel", ['node', '--import', 'tsx/esm', 'scripts/verify-ide-channel.tsx']],
     ["verify-whale-toggle", ['node', '--import', 'tsx/esm', 'scripts/verify-whale-toggle.mjs']],
+// 开屏大字字体设置（splashFont）：每个 id 解析到自己那款、daily 交回按天轮换、
+// 非法值回落 daily、channel 往返、/settings 选项覆盖全部取值、Config 默认值，
+// 以及 fontId 缝真的换脸（经典款上屏/方板款不在场）。
+    ["verify-splash-font-setting", ['node', '--import', 'tsx/esm', 'scripts/verify-splash-font-setting.mjs']],
 // 开屏鲸鱼三选一（classic 组合开场/heart/sleep）：帧表完整性（22 帧
 // 含 heart/sleep 新调色）、序列合法性（standard 起止/纯自家行为帧、
 // classic 仍捆绑眨眼+喷水+摆尾）、随机选取 API 覆盖/钳制/每次挂载
@@ -557,6 +594,10 @@ const GROUPS = {
 // 丢上下文"事故根因）；persistence 类失败与通用失败分开提示。
     ["verify-compact-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-compact-switch.tsx']],
     ["verify-live-session", ['node', '--import', 'tsx/esm', 'scripts/verify-live-session.ts']],
+// 血缘 × 自动标题回归：/model 在还没有人说过话的会话上不得写 parentSession
+// （上游 first-prompt 标题 provider 只为无 parent 的会话生成标题，fork 永不
+// 重试）；已有对话的源仍必须保留分支血缘，既有 /model 语义不得被削掉。
+    ["verify-session-title-lineage", ['node', '--import', 'tsx/esm', 'scripts/verify-session-title-lineage.ts']],
     ["verify-session-v3", ['node', '--import', 'tsx/esm', 'scripts/verify-session-v3.ts']],
     ["verify-session-tree-generations", ['node', '--import', 'tsx/esm', 'scripts/verify-session-tree-generations.ts']],
 // 裸 ● 空行回归：纯思考/纯工具步骤（无文本块）的 assistant/message
@@ -604,6 +645,8 @@ const GROUPS = {
 // 匹配、北京时间高峰/空闲时段边界、缓存命中计价、未知模型与零 token
 // 不估算、官方 provider 判定。注入 fake fetch，不发真实请求。
     ["verify-balance", ['node', '--import', 'tsx/esm', 'scripts/verify-balance.tsx']],
+// 本会话费用估算回归（#1089）：主会话按模型分桶 + 子代理按各自 (provider, model)、峰值/空闲、缓存分项合并计价，非官方/未收录只报 token 并标注未计价。
+    ["verify-session-cost", ['node', '--import', 'tsx/esm', 'scripts/verify-session-cost.tsx']],
 // /model 二级选择器派生回归：provider 分组（首现排序、显示名回退、
 // 计数）与落焦规则（多 provider 聚焦当前组、单 provider 直达模型层、
 // 缺席当前 provider 落首行）。键盘与 overlay 归约由 verify-chat-overlay
@@ -675,6 +718,9 @@ const GROUPS = {
 // 树内每个测量所依据的宽度失效，而没有任何节点被标脏，文本节点会沿用
 // 旧宽度的测量结果，靠 flex 仲裁的行因此由两套布局拼成。
     ["verify-resize-reflow", ['node', '--import', 'tsx/esm', 'scripts/verify-resize-reflow.tsx']],
+// 上下文进度条右对齐回归（#922）：页脚根 Box paddingX={1} ⇒ 内容区实宽
+// columns - 2，bar 也必须按 columns - 2 取宽——右端与状态行右缘逐格比对。
+    ["verify-context-bar-alignment", ['node', '--import', 'tsx/esm', 'scripts/verify-context-bar-alignment.tsx']],
 // Ctrl+T 归属回归：启动上下文面板在屏时该键属于面板（它自己在屏幕上
 // 印着「Ctrl+T 展开」），转录有行之后才归轨迹场景。两者永不同屏——
 // 面板只在首条消息前出现，而那正是轨迹为空的窗口。
@@ -685,7 +731,9 @@ const GROUPS = {
     ["repro-collapse-shrink", ['node', '--import', 'tsx/esm', 'scripts/repro-collapse-shrink.tsx']],
 // /provider 向导回归：catalog/custom 两分支的 profile 形状、凭据回滚
 // （覆盖时恢复旧 key 而非误删）、env shadow 跳过、rc.6 兼容守卫、
-// hideCustomInput 逐题标记。
+// hideCustomInput 逐题标记；模型列表编辑的双通道发现（内置目录 + 无
+// provider 字段的端点实拉）合并、线上新增标记、目录外 id 容量写入、
+// 实拉失败降级与匿名探测请求形状。
     ["verify-provider-wizard", ['node', 'scripts/verify-provider-wizard.mjs']],
 // /login 凭据状态回归（issue #213）：只通过 credentials.describe()
 // 展示 configured/source/writable，managed key 不得误报或泄露值。
@@ -705,6 +753,13 @@ const GROUPS = {
 // 长问卷列表回归：24 行终端中的 36 个两行 provider 选项必须围绕
 // focusIndex 窗口化，初始和深度导航后焦点 label/单选标记始终可见。
     ["verify-askpanel-long-list", ['node', '--import', 'tsx/esm', 'scripts/verify-askpanel-long-list.tsx']],
+// 问卷作答记录的真源投影回归（issue #1009）：ask_user_question 不渲染工具卡，
+// 它的 tool/result 必须自己折叠出作答记录——实时一条、重放（/resume、rewind、
+// 模型切换）同一条、同 callId 不重复、错误结果渲染日志里的错误文本（ASK_CANCELLED/
+// ASK_ABORTED 不得伪造答案）、redact 仍只在本地向导打码、不可解析的载荷退化成
+// 只有标题而不抛异常中断投影。修复前记录只由面板「开→关」那一跳 pushLocal 推送，
+// 重放后必丢。
+    ["verify-question-transcript-record", ['node', '--import', 'tsx/esm', 'scripts/verify-question-transcript-record.tsx']],
 // 长 plan-review 正文回归（issue #413）：24 行终端里 40 段 plan 不得把
 // Approve/反馈顶出屏外；滚轮必须滚 plan body（直接面板 + 挂进 Chat）。
     ["verify-plan-review-scroll", ['node', '--import', 'tsx/esm', 'scripts/verify-plan-review-scroll.tsx']],

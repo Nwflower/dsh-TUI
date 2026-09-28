@@ -10,6 +10,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { MigrationAdapter, MigrationDiscovery, MigrationSession, MigrationTurn } from '../types.js'
+import { emptyStats, fromRoleTurns } from '../parse/role-turns.js'
 import { countEntries } from './scan.js'
 
 interface ContentBlock { readonly type?: unknown, readonly text?: unknown }
@@ -78,7 +79,7 @@ function readOne(path: string): MigrationSession | undefined {
     }
   }
   if (turns.length === 0 || cwd === undefined) return undefined
-  return { sourceId, cwd, title, startedAt: startedAt || turns[0]!.time, turns }
+  return { sourceId, cwd, title, titleExplicit: false, startedAt: startedAt || turns[0]!.time, turns: fromRoleTurns(turns), stats: emptyStats() }
 }
 
 export const ompAdapter: MigrationAdapter = {
